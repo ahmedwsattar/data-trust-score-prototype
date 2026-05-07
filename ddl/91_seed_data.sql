@@ -1,0 +1,14 @@
+-------------------------------------------------------------------------------
+-- 91_seed_data.sql  (driver / index)
+--
+-- Run the files in ddl/seed/ in this order, in a Snowflake worksheet:
+--   1. 91a_seed_pnc_trust_score_weights.sql
+--   2. 91b_seed_pnc_source_classification.sql
+--   3. 91c_seed_pnc_data_ownership_registry.sql
+--   4. 91d_seed_pnc_key_property_registry.sql
+--   5. 91e_seed_pnc_dq_results.sql
+--   6. 91f_seed_pnc_dq_dimension_results.sql
+--
+-- (Snowflake worksheets do not have a multi-file include directive,
+-- so this file is intentionally just a checklist.)
+-------------------------------------------------------------------------------
