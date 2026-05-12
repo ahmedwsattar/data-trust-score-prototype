@@ -227,7 +227,7 @@ def render_portfolio() -> None:
 
     st.divider()
 
-    left, right = st.columns([1.4, 1])
+    left, center, right = st.columns([1.4, 1, 1])
 
     # Heatmap: datasets x dimensions -------------------------------------
     with left:
@@ -267,6 +267,38 @@ def render_portfolio() -> None:
             )
         )
         st.altair_chart(heat + text, use_container_width=True)
+
+
+    # Tier table ---------------------------------------------------------
+    with center:
+        st.markdown("**Trust tier ranking**")
+        ranking = (
+            dq_latest[
+                [
+                    "DATASET_NAME",
+                    "DOMAIN",
+                    "TRUST_SCORE_OVERALL",
+                    "TRUST_SCORE_TIER",
+                    "DIM_ISSUES_OPEN_P1",
+                    "DIM_TIMELINESS_HOURS_LATE",
+                ]
+            ]
+            .sort_values("TRUST_SCORE_OVERALL", ascending=False)
+            .reset_index(drop=True)
+        )
+        ranking.columns = ["Dataset", "Domain", "Score", "Tier", "P1 issues", "Hours late"]
+        st.dataframe(
+            ranking,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Score": st.column_config.ProgressColumn(
+                    "Score", min_value=0, max_value=100, format="%.1f"
+                ),
+                "Tier": st.column_config.TextColumn("Tier"),
+                "Hours late": st.column_config.NumberColumn("Hours late", format="%.1f"),
+            },
+        )
 
     # Tier table ---------------------------------------------------------
     with right:
