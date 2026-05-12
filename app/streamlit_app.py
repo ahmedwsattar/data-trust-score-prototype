@@ -55,7 +55,7 @@ STATUS_COLOR = {"GREEN": "#2E7D32", "AMBER": "#ED9B0F", "RED": "#C44545"}
 # Heatmap colour ramp (red -> amber -> green).
 SCORE_COLOR_SCALE = alt.Scale(
     domain=[0, 50, 60, 80, 100],
-    range=["#C44545", "#C44545", "#ED9B0F", "#FFD971", "#2E7D32"],
+    range=["#00204C", "#1F4E79", "#4C78A8", "#A1A84B", "#FDE725"],
 )
 
 
@@ -181,7 +181,7 @@ latest_date = dq["SCORE_RUN_DATE"].max()
 
 with st.sidebar:
     st.header("Navigation")
-    page = st.radio(
+    page = st.selectbox(
         "View",
         ["Portfolio Scorecard", "Dataset Detail", "Methodology & Weights"],
         label_visibility="collapsed",
@@ -227,7 +227,7 @@ def render_portfolio() -> None:
 
     st.divider()
 
-    left, center, right = st.columns([1.4, 1, 1])
+    left, right = st.columns([1.7, 0.25])
 
     # Heatmap: datasets x dimensions -------------------------------------
     with left:
@@ -249,87 +249,85 @@ def render_portfolio() -> None:
                 x=alt.X(
                     "Dimension:N",
                     sort=[name for _, name, _ in DIMENSIONS],
-                    axis=alt.Axis(orient="top", labelAngle=-30),
+                    axis=alt.Axis(orient="top", labelAngle=0, labelFontSize=11, labelAlign="center"),
                 ),
-                y=alt.Y("DATASET_NAME:N", title=""),
+                y=alt.Y(
+                    "DATASET_NAME:N", 
+                    title="Dataset Title",
+                    axis=alt.Axis(labelFontSize=10, labelAlign="right"),
+                ),
                 color=alt.Color("Score:Q", scale=SCORE_COLOR_SCALE, legend=alt.Legend(title="Score")),
                 tooltip=["DATASET_NAME", "Dimension", alt.Tooltip("Score:Q", format=".1f")],
             )
-            .properties(height=40 * dq_latest["DATASET_NAME"].nunique() + 30)
+            .properties(height=50 * dq_latest["DATASET_NAME"].nunique() + 40)
         )
         text = (
             alt.Chart(melt)
-            .mark_text(color="white", fontWeight="bold")
+            .mark_text(fontWeight="bold")
             .encode(
                 x=alt.X("Dimension:N", sort=[name for _, name, _ in DIMENSIONS]),
                 y="DATASET_NAME:N",
                 text=alt.Text("Score:Q", format=".0f"),
+                color=alt.condition(
+                    alt.datum.Score >= 90, 
+                    alt.value("#111827"),
+                    alt.value("#F9FAFB"),
+                ),
             )
         )
-        st.altair_chart(heat + text, use_container_width=True)
-
-
-    # Tier table ---------------------------------------------------------
-    with center:
-        st.markdown("**Trust tier ranking**")
-        ranking = (
-            dq_latest[
-                [
-                    "DATASET_NAME",
-                    "DOMAIN",
-                    "TRUST_SCORE_OVERALL",
-                    "TRUST_SCORE_TIER",
-                    "DIM_ISSUES_OPEN_P1",
-                    "DIM_TIMELINESS_HOURS_LATE",
-                ]
-            ]
-            .sort_values("TRUST_SCORE_OVERALL", ascending=False)
-            .reset_index(drop=True)
-        )
-        ranking.columns = ["Dataset", "Domain", "Score", "Tier", "P1 issues", "Hours late"]
-        st.dataframe(
-            ranking,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Score": st.column_config.ProgressColumn(
-                    "Score", min_value=0, max_value=100, format="%.1f"
-                ),
-                "Tier": st.column_config.TextColumn("Tier"),
-                "Hours late": st.column_config.NumberColumn("Hours late", format="%.1f"),
-            },
-        )
+        st.altair_chart(heat + text, width='stretch')
 
     # Tier table ---------------------------------------------------------
     with right:
-        st.markdown("**Trust tier ranking**")
+        st.markdown("**Data Sources**")
         ranking = (
             dq_latest[
                 [
                     "DATASET_NAME",
                     "DOMAIN",
-                    "TRUST_SCORE_OVERALL",
-                    "TRUST_SCORE_TIER",
-                    "DIM_ISSUES_OPEN_P1",
-                    "DIM_TIMELINESS_HOURS_LATE",
                 ]
             ]
-            .sort_values("TRUST_SCORE_OVERALL", ascending=False)
+            .sort_values("DATASET_NAME", ascending=True)
             .reset_index(drop=True)
         )
-        ranking.columns = ["Dataset", "Domain", "Score", "Tier", "P1 issues", "Hours late"]
+        ranking.columns = ["Dataset", "Domain"]
         st.dataframe(
             ranking,
-            use_container_width=True,
+            width='stretch',
+            height=50 * dq_latest["DATASET_NAME"].nunique() + 40,
             hide_index=True,
-            column_config={
-                "Score": st.column_config.ProgressColumn(
-                    "Score", min_value=0, max_value=100, format="%.1f"
-                ),
-                "Tier": st.column_config.TextColumn("Tier"),
-                "Hours late": st.column_config.NumberColumn("Hours late", format="%.1f"),
-            },
         )
+
+    st.divider()
+
+    st.markdown("**Trust tier ranking**")
+    ranking = (
+        dq_latest[
+            [
+                "DATASET_NAME",
+                "DOMAIN",
+                "TRUST_SCORE_OVERALL",
+                "TRUST_SCORE_TIER",
+                "DIM_ISSUES_OPEN_P1",
+                "DIM_TIMELINESS_HOURS_LATE",
+            ]
+        ]
+        .sort_values("TRUST_SCORE_OVERALL", ascending=False)
+        .reset_index(drop=True)
+    )
+    ranking.columns = ["Dataset", "Domain", "Score", "Tier", "P1 issues", "Hours late"]
+    st.dataframe(
+        ranking,
+        width='stretch',
+        hide_index=True,
+        column_config={
+            "Score": st.column_config.ProgressColumn(
+                "Score", min_value=0, max_value=100, format="%.1f"
+            ),
+            "Tier": st.column_config.TextColumn("Tier"),
+            "Hours late": st.column_config.NumberColumn("Hours late", format="%.1f"),
+        },
+    )
 
     st.divider()
 
@@ -349,19 +347,19 @@ def render_portfolio() -> None:
         alt.Chart(grouped)
         .mark_bar()
         .encode(
-            x=alt.X("DOMAIN:N", title="", axis=alt.Axis(labelAngle=0)),
-            y=alt.Y("Score:Q", scale=alt.Scale(domain=[0, 100])),
+            x=alt.X("DOMAIN:N", title="Domain", axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("Score:Q", title="Average Score", scale=alt.Scale(domain=[0, 100])),
             color=alt.Color("DOMAIN:N", legend=None),
             column=alt.Column(
                 "Dimension:N",
                 sort=[name for _, name, _ in DIMENSIONS],
-                header=alt.Header(labelAngle=-30, labelAlign="right", labelFontSize=10),
+                header=alt.Header(labelAngle=0, labelAlign="right", labelFontSize=10),
             ),
             tooltip=["DOMAIN", "Dimension", alt.Tooltip("Score:Q", format=".1f")],
         )
-        .properties(width=70, height=260)
+        .properties(width=120, height=300)
     )
-    st.altair_chart(bar, use_container_width=False)
+    st.altair_chart(bar, width='content')
 
 
 # --------------------------------------------------------------------------
@@ -449,7 +447,7 @@ def render_detail() -> None:
     breakdown = pd.DataFrame(rows_out)
     st.dataframe(
         breakdown,
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         column_config={
             "Weight": st.column_config.NumberColumn("Weight %", format="%.0f"),
@@ -493,7 +491,7 @@ def render_detail() -> None:
         .mark_rule(strokeDash=[3, 3])
         .encode(y="y:Q", color=alt.Color("color:N", scale=None, legend=None))
     )
-    st.altair_chart(base + rules, use_container_width=True)
+    st.altair_chart(base + rules, width='stretch')
 
     # Per-dimension trend (small multiples) ------------------------------
     st.markdown("**Per-dimension trend**")
@@ -513,7 +511,7 @@ def render_detail() -> None:
             columns=5,
         )
     )
-    st.altair_chart(facet, use_container_width=False)
+    st.altair_chart(facet, width='content')
 
     # Sub-fact tables ----------------------------------------------------
     a, b = st.columns(2)
@@ -550,7 +548,7 @@ def render_detail() -> None:
                 }
             )
             display["Null %"] = (display["Null %"] * 100).round(2)
-            st.dataframe(display, use_container_width=True, hide_index=True)
+            st.dataframe(display, width='stretch', hide_index=True)
 
 
 # --------------------------------------------------------------------------
@@ -571,7 +569,7 @@ def render_methodology() -> None:
         st.markdown("**Weights (sum = 100)**")
         st.dataframe(
             weights[["DIMENSION_CODE", "DIMENSION_NAME", "WEIGHT_PCT"]],
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             column_config={
                 "DIMENSION_CODE": "Code",
@@ -589,7 +587,7 @@ def render_methodology() -> None:
             )
             .properties(height=320)
         )
-        st.altair_chart(donut, use_container_width=True)
+        st.altair_chart(donut, width='stretch')
 
     with c2:
         st.markdown("**Per-dimension status thresholds**")
