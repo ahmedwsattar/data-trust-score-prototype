@@ -377,7 +377,7 @@ def _tier_color_for(score: float) -> str:
 
 
 def render_detail() -> None:
-    st.subheader("Dataset detail")
+    st.subheader("Dataset Detail")
     if dq_latest.empty:
         st.info("No datasets match the current filters.")
         return
@@ -396,7 +396,7 @@ def render_detail() -> None:
     with h1:
         st.markdown(f"### {dataset_name}")
         st.markdown(
-            f"<span class='small-muted'>{row['DATASET_FQN']} &middot; "
+            f"<span style='color:#39FF14;' class='small-muted'>{row['DATASET_FQN']} &middot; "
             f"{row['DOMAIN']} &middot; {row['LAYER']}</span>",
             unsafe_allow_html=True,
         )
@@ -493,25 +493,57 @@ def render_detail() -> None:
     )
     st.altair_chart(base + rules, width='stretch')
 
-    # Per-dimension trend (small multiples) ------------------------------
+    # # Per-dimension trend (small multiples) ------------------------------
+    # st.markdown("**Per-dimension trend**")
+    # dim_trend = dim_long[dim_long["DATASET_ID"] == row["DATASET_ID"]]
+    # facet = (
+    #     alt.Chart(dim_trend)
+    #     .mark_line()
+    #     .encode(
+    #         x=alt.X("SCORE_RUN_DATE:T", title=""),
+    #         y=alt.Y("SCORE:Q", scale=alt.Scale(domain=[0, 100]), title=""),
+    #         color=alt.Color("DIMENSION_NAME:N", legend=None),
+    #         tooltip=["DIMENSION_NAME", "SCORE_RUN_DATE", alt.Tooltip("SCORE:Q", format=".1f")],
+    #     )
+    #     .properties(width=260,height=110)
+    #     .facet(
+    #         facet=alt.Facet("DIMENSION_NAME:N", header=alt.Header(labelFontSize=10)),
+    #         columns=5,
+    #     )
+    # )
+    # st.altair_chart(facet)
+
+    # Per-dimension trend (single selection) ------------------------------
     st.markdown("**Per-dimension trend**")
-    dim_trend = dim_long[dim_long["DATASET_ID"] == row["DATASET_ID"]]
-    facet = (
-        alt.Chart(dim_trend)
-        .mark_line()
-        .encode(
-            x=alt.X("SCORE_RUN_DATE:T", title=""),
-            y=alt.Y("SCORE:Q", scale=alt.Scale(domain=[0, 100]), title=""),
-            color=alt.Color("DIMENSION_NAME:N", legend=None),
-            tooltip=["DIMENSION_NAME", "SCORE_RUN_DATE", alt.Tooltip("SCORE:Q", format=".1f")],
-        )
-        .properties(width=140, height=110)
-        .facet(
-            facet=alt.Facet("DIMENSION_NAME:N", header=alt.Header(labelFontSize=10)),
-            columns=5,
-        )
+
+    dim_trend = dim_long[dim_long["DATASET_ID"] == row["DATASET_ID"]].copy()
+    dimensions = sorted(dim_trend["DIMENSION_NAME"].dropna().unique())
+
+    selected_dim = st.selectbox(
+        "Choose a dimension",
+        options=dimensions,
+        key=f"dim_selector_{row['DATASET_ID']}",  # important if this is inside a loop
     )
-    st.altair_chart(facet, width='content')
+
+    filtered = dim_trend[dim_trend["DIMENSION_NAME"] == selected_dim]
+
+    single_trend = (
+        alt.Chart(filtered)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("SCORE_RUN_DATE:T", title="Run Date", axis=alt.Axis(format="%d %b %Y")),
+            y=alt.Y("SCORE:Q", scale=alt.Scale(domain=[0, 100]), title="Score"),
+            color=alt.Color("DIMENSION_NAME:N", legend=None),
+            tooltip=[
+                alt.Tooltip("DIMENSION_NAME:N", title="Dimension"),
+                alt.Tooltip("SCORE_RUN_DATE:T", title="Run date"),
+                alt.Tooltip("SCORE:Q", format=".1f", title="Score"),
+            ],
+        )
+        .properties(width=260, height=260)
+    )
+
+    st.altair_chart(single_trend, width='stretch')
 
     # Sub-fact tables ----------------------------------------------------
     a, b = st.columns(2)
@@ -547,8 +579,43 @@ def render_detail() -> None:
                     "NULL_PCT": "Null %",
                 }
             )
+            # Convert booleans to readable labels so we can color them clearly.
+            bool_cols = ["Required", "In schema", "Has definition"]
+            for col in bool_cols:
+                display[col] = display[col].map({True: "Yes", False: "No"}).fillna("Unknown")
+
             display["Null %"] = (display["Null %"] * 100).round(2)
-            st.dataframe(display, width='stretch', hide_index=True)
+
+            def style_bool(v: str) -> str:
+                if v == "Yes":
+                    return "color:#0B6E3D; background-color:#EAF7EE; font-weight:700;"
+                if v == "No":
+                    return "color:#8A1525; background-color:#FDECEE; font-weight:700;"
+                return "color:#475569; background-color:#F8FAFC; font-weight:600;"
+            def style_null_pct(v: float) -> str:
+                if pd.isna(v):
+                    return ""
+                if v >= 20:
+                    return "color:#7A0612; background-color:#FDECEE; font-weight:700;"
+                if v >= 5:
+                    return "color:#8A5A00; background-color:#FFF7E6; font-weight:700;"
+                return "color:#0B6E3D; background-color:#EAF7EE; font-weight:700;"
+            def style_string(v: str) -> str:
+                if v == "Yes":
+                    return "color:#0B6E3D; background-color:#EAF7EE; font-weight:700;"
+                if v == "No":
+                    return "color:#8A1525; background-color:#FDECEE; font-weight:700;"
+                return "color:#475569; background-color:#F8FAFC; font-weight:600;"
+            
+            styled = (
+                display.style
+                .map(style_string, subset=["Field", "Role"])
+                .map(style_bool, subset=bool_cols)
+                .map(style_null_pct, subset=["Null %"])
+                .format({"Null %": "{:.2f}%"})
+            )
+
+            st.dataframe(styled, width='stretch', hide_index=True)
 
 
 # --------------------------------------------------------------------------
@@ -556,7 +623,7 @@ def render_detail() -> None:
 # --------------------------------------------------------------------------
 
 def render_methodology() -> None:
-    st.subheader("Methodology & weights")
+    st.subheader("Methodology & Weights")
     st.markdown(
         "The Trust Score is a weighted average of 10 dimensions. Weights, "
         "thresholds, and tier cut-points are stored in "
