@@ -131,6 +131,39 @@ def load_weights() -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------
+# Cortex DQ / DMF loaders. These read live from the bridge views created in
+# ddl/22_*.sql when running in Snowflake AND DMFs have been wired up. They
+# return None in every other case so the page can render a "not enabled"
+# state instead of crashing.
+# --------------------------------------------------------------------------
+
+@st.cache_data(show_spinner=False, ttl=60)
+def load_dmf_measurements() -> pd.DataFrame | None:
+    if not _running_in_snowflake():
+        return None
+    try:
+        return _read_snowflake(
+            "VW_PNC_DMF_LATEST_MEASUREMENTS",
+            date_cols=["MEASUREMENT_TIME"],
+        )
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def load_dmf_dimension_scores() -> pd.DataFrame | None:
+    if not _running_in_snowflake():
+        return None
+    try:
+        return _read_snowflake(
+            "VW_PNC_DMF_DIMENSION_SCORES",
+            date_cols=["COMPUTED_AT"],
+        )
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------
 # Page setup
 # --------------------------------------------------------------------------
 
@@ -183,7 +216,7 @@ with st.sidebar:
     st.header("Navigation")
     page = st.radio(
         "View",
-        ["Portfolio Scorecard", "Dataset Detail", "Methodology & Weights"],
+        ["Portfolio Scorecard", "Dataset Detail", "Cortex DQ", "Methodology & Weights"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -522,7 +555,221 @@ def render_detail() -> None:
 
 
 # --------------------------------------------------------------------------
-# Page 3 - Methodology & Weights
+# Page 3 - Cortex DQ (live DMF measurements bridged to dimensions 3/4/5/6)
+# --------------------------------------------------------------------------
+
+CORTEX_DQ_HOWTO = """
+This page reads from `SNOWFLAKE.LOCAL.DATA_QUALITY_MONITORING_RESULTS` via two
+bridge views. To enable it on a table in this POC schema, run these files
+in a Snowflake worksheet (in order):
+
+```
+ddl/20_cortex_dq_setup.sql               -- demo table + 5 attached DMFs
+ddl/21_pnc_dmf_dataset_map.sql           -- physical-to-logical bridge tables
+ddl/22_vw_pnc_dmf_dimension_scores.sql   -- bridge views the app reads
+ddl/seed/22a_seed_pnc_dmf_dataset_map.sql
+```
+
+After the first scheduled DMF run (~5 minutes, or trigger immediately by
+calling each DMF inline -- see Section D of file 20), this page will populate.
+
+Prerequisites flagged in file 20: `SNOWFLAKE.DATA_METRIC_USER` +
+`SNOWFLAKE.CORTEX_USER` granted to `DATA_CLEAN_ROOM_ROLE`, and
+`mistral-7b` / `llama3.1-8b` on the model allowlist (only required for
+the Cortex AI-suggestion path).
+"""
+
+
+def render_cortex_dq() -> None:
+    st.subheader("Cortex Data Quality (DMF-derived dimensions)")
+    st.caption(
+        "Live measurements from Snowflake's native Data Metric Functions, "
+        "bridged into Trust Score dimensions 3 (Active Issues), 4 (Timeliness), "
+        "5 (Completeness of Key Properties), and 6 (Data Profiling)."
+    )
+
+    if not _running_in_snowflake():
+        st.info(
+            "Cortex DQ data is only available when this app runs inside "
+            "Streamlit in Snowflake (SiS). Locally the bridge views don't "
+            "exist, so this page is read-only documentation."
+        )
+        with st.expander("How to enable on a table", expanded=True):
+            st.markdown(CORTEX_DQ_HOWTO)
+        return
+
+    measurements = load_dmf_measurements()
+    scores = load_dmf_dimension_scores()
+
+    if measurements is None or scores is None:
+        st.warning(
+            "The bridge views (`VW_PNC_DMF_LATEST_MEASUREMENTS`, "
+            "`VW_PNC_DMF_DIMENSION_SCORES`) aren't in this schema yet."
+        )
+        with st.expander("How to enable on a table", expanded=True):
+            st.markdown(CORTEX_DQ_HOWTO)
+        return
+
+    if measurements.empty:
+        st.warning(
+            "Bridge views exist but no DMF measurements have landed yet. "
+            "If you just attached DMFs, the first scheduled run may take "
+            "up to 5 minutes. To trigger an instant measurement, run the "
+            "inline DMF queries in Section D of `ddl/20_cortex_dq_setup.sql`."
+        )
+        return
+
+    # KPI strip ----------------------------------------------------------
+    total_checks = len(measurements)
+    failing = int((measurements["STATUS"] == "FAIL").sum())
+    passing = int((measurements["STATUS"] == "PASS").sum())
+    untested = total_checks - failing - passing
+    last_seen = measurements["MEASUREMENT_TIME"].max()
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Datasets wired", scores["DATASET_ID"].nunique())
+    c2.metric("DMF readings", total_checks)
+    c3.metric("Passing", passing)
+    c4.metric("Failing", failing, delta_color="inverse")
+    c5.metric(
+        "Last measurement",
+        pd.Timestamp(last_seen).strftime("%H:%M") if pd.notna(last_seen) else "—",
+    )
+    if untested:
+        st.caption(
+            f"{untested} reading(s) have no threshold defined yet — add rows "
+            "to `PNC_DMF_THRESHOLDS` to score them."
+        )
+
+    st.divider()
+
+    # Per-dataset derived dimension scores -------------------------------
+    st.markdown("**Derived dimension scores (live from DMFs)**")
+    score_cols = [
+        "DATASET_NAME",
+        "DOMAIN",
+        "DIM_ISSUES_SCORE",
+        "DIM_TIMELINESS_SCORE",
+        "DIM_COMPLETENESS_KEY_PROPS_SCORE",
+        "DIM_PROFILING_SCORE",
+        "DIM_ISSUES_OPEN_P1",
+        "DIM_TIMELINESS_HOURS_LATE",
+    ]
+    available = [c for c in score_cols if c in scores.columns]
+    display = scores[available].copy()
+    rename = {
+        "DATASET_NAME": "Dataset",
+        "DOMAIN": "Domain",
+        "DIM_ISSUES_SCORE": "Active Issues",
+        "DIM_TIMELINESS_SCORE": "Timeliness",
+        "DIM_COMPLETENESS_KEY_PROPS_SCORE": "Completeness (keys)",
+        "DIM_PROFILING_SCORE": "Profiling",
+        "DIM_ISSUES_OPEN_P1": "Open P1",
+        "DIM_TIMELINESS_HOURS_LATE": "Hours late",
+    }
+    display = display.rename(columns=rename)
+    progress_cols = ["Active Issues", "Timeliness", "Completeness (keys)", "Profiling"]
+    column_config = {
+        c: st.column_config.ProgressColumn(c, min_value=0, max_value=100, format="%.1f")
+        for c in progress_cols
+        if c in display.columns
+    }
+    column_config["Hours late"] = st.column_config.NumberColumn(
+        "Hours late", format="%.1f"
+    )
+    st.dataframe(
+        display, use_container_width=True, hide_index=True, column_config=column_config
+    )
+
+    st.divider()
+
+    # Raw measurements table ---------------------------------------------
+    st.markdown("**Latest DMF measurements (raw)**")
+    raw = measurements.copy()
+    raw["MEASUREMENT_TIME"] = pd.to_datetime(raw["MEASUREMENT_TIME"], errors="coerce")
+    show_cols = [
+        "DATASET_ID",
+        "METRIC_NAME",
+        "COLUMN_NAME",
+        "VALUE",
+        "THRESHOLD_OP",
+        "THRESHOLD_VALUE",
+        "STATUS",
+        "SEVERITY_ON_FAIL",
+        "MEASUREMENT_TIME",
+    ]
+    show_cols = [c for c in show_cols if c in raw.columns]
+    raw_display = raw[show_cols].sort_values(
+        ["DATASET_ID", "METRIC_NAME", "COLUMN_NAME"]
+    )
+
+    def _row_style(row: pd.Series) -> list[str]:
+        if row.get("STATUS") == "FAIL":
+            return ["background-color:#FDECEC"] * len(row)
+        if row.get("STATUS") == "PASS":
+            return ["background-color:#EAF6EC"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(
+        raw_display.style.apply(_row_style, axis=1),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # Comparison with bespoke scores -------------------------------------
+    st.divider()
+    st.markdown("**DMF-derived vs current synthetic score (per wired dataset)**")
+    compare_rows = []
+    for _, srow in scores.iterrows():
+        ds_id = srow["DATASET_ID"]
+        bespoke = dq_latest[dq_latest["DATASET_ID"] == ds_id]
+        if bespoke.empty:
+            continue
+        b = bespoke.iloc[0]
+        for label, dmf_col, syn_col in [
+            ("Active Issues",       "DIM_ISSUES_SCORE",                "DIM_ISSUES_SCORE"),
+            ("Timeliness",          "DIM_TIMELINESS_SCORE",            "DIM_TIMELINESS_SCORE"),
+            ("Completeness (keys)", "DIM_COMPLETENESS_KEY_PROPS_SCORE","DIM_COMPLETENESS_KEY_PROPS_SCORE"),
+            ("Profiling",           "DIM_PROFILING_SCORE",             "DIM_PROFILING_SCORE"),
+        ]:
+            dmf_val = srow.get(dmf_col)
+            syn_val = b.get(syn_col)
+            if pd.isna(dmf_val) or pd.isna(syn_val):
+                continue
+            compare_rows.append({
+                "Dataset": srow.get("DATASET_NAME") or ds_id,
+                "Dimension": label,
+                "DMF-derived": float(dmf_val),
+                "Current (synthetic)": float(syn_val),
+                "Delta": float(dmf_val) - float(syn_val),
+            })
+    if compare_rows:
+        cmp_df = pd.DataFrame(compare_rows)
+        st.dataframe(
+            cmp_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "DMF-derived":         st.column_config.ProgressColumn("DMF-derived",         min_value=0, max_value=100, format="%.1f"),
+                "Current (synthetic)": st.column_config.ProgressColumn("Current (synthetic)", min_value=0, max_value=100, format="%.1f"),
+                "Delta":               st.column_config.NumberColumn("Delta", format="%+.1f"),
+            },
+        )
+        st.caption(
+            "Once governance signs off on the DMF-derived scores, swap them "
+            "into `PNC_DQ_RESULTS` via a nightly task and retire the bespoke "
+            "logic for these four dimensions."
+        )
+    else:
+        st.caption(
+            "No overlap between wired DMF datasets and the synthetic "
+            "scorecard — the comparison panel will populate once you map a "
+            "common DATASET_ID."
+        )
+
+
+# --------------------------------------------------------------------------
+# Page 4 - Methodology & Weights
 # --------------------------------------------------------------------------
 
 def render_methodology() -> None:
@@ -599,5 +846,7 @@ if page == "Portfolio Scorecard":
     render_portfolio()
 elif page == "Dataset Detail":
     render_detail()
+elif page == "Cortex DQ":
+    render_cortex_dq()
 else:
     render_methodology()
