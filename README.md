@@ -235,6 +235,7 @@ ddl/25_manual_dmf_fallback.sql           -- TRACK B: SP + manual measurements ta
 ddl/21_pnc_dmf_dataset_map.sql           -- physical->logical map + threshold config
 ddl/22_vw_pnc_dmf_dimension_scores.sql   -- bridge views the Streamlit page reads
 ddl/seed/22a_seed_pnc_dmf_dataset_map.sql
+ddl/40_workforce_analytics_views.sql     -- applied analytics on top (Appendix B)
 ```
 
 ### One-time prerequisites (DBA / ACCOUNTADMIN)
@@ -349,3 +350,57 @@ points to the prior proxy-view pattern (preserved in git history) — wrap
 the source in a view in a schema you own and attach DMFs to the view
 instead. Update the rows in `PNC_DMF_DATASET_MAP` to point at the view's
 FQN if you take this path.
+
+---
+
+## Appendix B — Workforce analytics & TA analytics (applied AI use cases)
+
+On top of the Trust Score and Cortex DQ surfaces, the prototype ships two
+applied-analytics pages that answer specific client AI use cases using
+**only the real data already loaded** — no Cortex grant required.
+
+| Page | Use case answered | View(s) |
+|---|---|---|
+| **Workforce Shifts** | Anomaly detection (UC #1), workforce shift detection + reorg detection (UC #2) | `VW_WORKFORCE_ANOMALIES`, `VW_WORKFORCE_WEEKLY_METRICS`, `VW_REORG_EVENTS` |
+| **TA Analytics** | Time-to-fill distribution + recruiter workload (UC #3) | `VW_TIME_TO_FILL`, `VW_RECRUITER_WORKLOAD` |
+
+### Run order
+
+Add one step to the MVP run order from Appendix A:
+
+```
+12. ddl/40_workforce_analytics_views.sql   -- 5 applied-analytics views
+```
+
+The file requires no special privileges — only `SELECT` on
+`DT_TRENDED_REPORT` and `DT_POSITION_REPORT`, and `CREATE VIEW` in the
+working schema. It's independent of the Cortex DQ infrastructure (files
+20–25), so you can deploy it without running any of the DMF setup.
+
+### What each view does
+
+- **`VW_WORKFORCE_WEEKLY_METRICS`** — aggregates the trended report into
+  per-(week, L1) counts of headcount, hires, voluntary terms, involuntary
+  terms, and promotions, with a 4-week trailing baseline (mean + stddev).
+- **`VW_WORKFORCE_ANOMALIES`** — long-format z-score per (week, L1, metric).
+  Status is `ANOMALY` when |z| ≥ 2, `NOTABLE` when 1 ≤ |z| < 2.
+- **`VW_REORG_EVENTS`** — bulk L1/L2 movements between consecutive snapshots.
+  Default threshold is ≥ 5 employees moved in a single (week, from→to)
+  tuple.
+- **`VW_TIME_TO_FILL`** — per-position vacate→fill duration from the latest
+  `DT_POSITION_REPORT` snapshot.
+- **`VW_RECRUITER_WORKLOAD`** — open requisitions per recruiter, latest
+  snapshot. The Streamlit page flags any recruiter at or above 1.5× the
+  median open-req count as `OVERLOADED`.
+
+### What unlocks with full prod data + Cortex
+
+See [`docs/REAL_DATA_OPPORTUNITIES.md`](./docs/REAL_DATA_OPPORTUNITIES.md)
+for a detailed mapping of each client AI use case to:
+
+1. What works in the POC today
+2. What changes when pointed at production EDL tables
+3. What unlocks once `SNOWFLAKE.CORTEX_USER` is granted
+
+Includes a privilege-checklist for the Snowflake admin team and a
+phased roadmap.
