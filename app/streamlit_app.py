@@ -52,10 +52,11 @@ TIER_COLOR = {
 }
 STATUS_COLOR = {"GREEN": "#2E7D32", "AMBER": "#ED9B0F", "RED": "#C44545"}
 
-# Heatmap colour ramp (red -> amber -> green).
+# Heatmap colour ramp (dark blue -> teal -> yellow). Designed for the
+# dark theme; readable text contrast handled below via mark_text condition.
 SCORE_COLOR_SCALE = alt.Scale(
     domain=[0, 50, 60, 80, 100],
-    range=["#C44545", "#C44545", "#ED9B0F", "#FFD971", "#2E7D32"],
+    range=["#00204C", "#1F4E79", "#4C78A8", "#A1A84B", "#FDE725"],
 )
 
 
@@ -132,9 +133,12 @@ def load_weights() -> pd.DataFrame:
 
 # --------------------------------------------------------------------------
 # Cortex DQ / DMF loaders. These read live from the bridge views created in
-# ddl/22_*.sql when running in Snowflake AND DMFs have been wired up. They
-# return None in every other case so the page can render a "not enabled"
-# state instead of crashing.
+# ddl/22_*.sql. They return None in every other case so the page can render
+# a "not enabled" state instead of crashing.
+#
+# Source of measurements (whichever one populated the bridge view):
+#   - Track A: SNOWFLAKE.LOCAL.DATA_QUALITY_MONITORING_RESULTS (native DMFs)
+#   - Track B: PNC_DQ_MEASUREMENTS_MANUAL                       (file 25 SP)
 # --------------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False, ttl=60)
@@ -214,7 +218,7 @@ latest_date = dq["SCORE_RUN_DATE"].max()
 
 with st.sidebar:
     st.header("Navigation")
-    page = st.radio(
+    page = st.selectbox(
         "View",
         ["Portfolio Scorecard", "Dataset Detail", "Cortex DQ", "Methodology & Weights"],
         label_visibility="collapsed",
@@ -260,7 +264,7 @@ def render_portfolio() -> None:
 
     st.divider()
 
-    left, right = st.columns([1.4, 1])
+    left, right = st.columns([1.7, 0.25])
 
     # Heatmap: datasets x dimensions -------------------------------------
     with left:
@@ -282,55 +286,81 @@ def render_portfolio() -> None:
                 x=alt.X(
                     "Dimension:N",
                     sort=[name for _, name, _ in DIMENSIONS],
-                    axis=alt.Axis(orient="top", labelAngle=-30),
+                    axis=alt.Axis(orient="top", labelAngle=0, labelFontSize=11, labelAlign="center"),
                 ),
-                y=alt.Y("DATASET_NAME:N", title=""),
+                y=alt.Y(
+                    "DATASET_NAME:N",
+                    title="Dataset Title",
+                    axis=alt.Axis(labelFontSize=10, labelAlign="right"),
+                ),
                 color=alt.Color("Score:Q", scale=SCORE_COLOR_SCALE, legend=alt.Legend(title="Score")),
                 tooltip=["DATASET_NAME", "Dimension", alt.Tooltip("Score:Q", format=".1f")],
             )
-            .properties(height=40 * dq_latest["DATASET_NAME"].nunique() + 30)
+            .properties(height=50 * dq_latest["DATASET_NAME"].nunique() + 40)
         )
         text = (
             alt.Chart(melt)
-            .mark_text(color="white", fontWeight="bold")
+            .mark_text(fontWeight="bold")
             .encode(
                 x=alt.X("Dimension:N", sort=[name for _, name, _ in DIMENSIONS]),
                 y="DATASET_NAME:N",
                 text=alt.Text("Score:Q", format=".0f"),
+                color=alt.condition(
+                    alt.datum.Score >= 90,
+                    alt.value("#111827"),
+                    alt.value("#F9FAFB"),
+                ),
             )
         )
-        st.altair_chart(heat + text, use_container_width=True)
+        st.altair_chart(heat + text, width='stretch')
 
-    # Tier table ---------------------------------------------------------
+    # Data Sources mini-list (key alongside the heatmap y-axis) ----------
     with right:
-        st.markdown("**Trust tier ranking**")
-        ranking = (
-            dq_latest[
-                [
-                    "DATASET_NAME",
-                    "DOMAIN",
-                    "TRUST_SCORE_OVERALL",
-                    "TRUST_SCORE_TIER",
-                    "DIM_ISSUES_OPEN_P1",
-                    "DIM_TIMELINESS_HOURS_LATE",
-                ]
-            ]
-            .sort_values("TRUST_SCORE_OVERALL", ascending=False)
+        st.markdown("**Data Sources**")
+        sources = (
+            dq_latest[["DATASET_NAME", "DOMAIN"]]
+            .sort_values("DATASET_NAME", ascending=True)
             .reset_index(drop=True)
         )
-        ranking.columns = ["Dataset", "Domain", "Score", "Tier", "P1 issues", "Hours late"]
+        sources.columns = ["Dataset", "Domain"]
         st.dataframe(
-            ranking,
-            use_container_width=True,
+            sources,
+            width='stretch',
+            height=50 * dq_latest["DATASET_NAME"].nunique() + 40,
             hide_index=True,
-            column_config={
-                "Score": st.column_config.ProgressColumn(
-                    "Score", min_value=0, max_value=100, format="%.1f"
-                ),
-                "Tier": st.column_config.TextColumn("Tier"),
-                "Hours late": st.column_config.NumberColumn("Hours late", format="%.1f"),
-            },
         )
+
+    st.divider()
+
+    # Tier ranking -------------------------------------------------------
+    st.markdown("**Trust tier ranking**")
+    ranking = (
+        dq_latest[
+            [
+                "DATASET_NAME",
+                "DOMAIN",
+                "TRUST_SCORE_OVERALL",
+                "TRUST_SCORE_TIER",
+                "DIM_ISSUES_OPEN_P1",
+                "DIM_TIMELINESS_HOURS_LATE",
+            ]
+        ]
+        .sort_values("TRUST_SCORE_OVERALL", ascending=False)
+        .reset_index(drop=True)
+    )
+    ranking.columns = ["Dataset", "Domain", "Score", "Tier", "P1 issues", "Hours late"]
+    st.dataframe(
+        ranking,
+        width='stretch',
+        hide_index=True,
+        column_config={
+            "Score": st.column_config.ProgressColumn(
+                "Score", min_value=0, max_value=100, format="%.1f"
+            ),
+            "Tier": st.column_config.TextColumn("Tier"),
+            "Hours late": st.column_config.NumberColumn("Hours late", format="%.1f"),
+        },
+    )
 
     st.divider()
 
@@ -350,19 +380,19 @@ def render_portfolio() -> None:
         alt.Chart(grouped)
         .mark_bar()
         .encode(
-            x=alt.X("DOMAIN:N", title="", axis=alt.Axis(labelAngle=0)),
-            y=alt.Y("Score:Q", scale=alt.Scale(domain=[0, 100])),
+            x=alt.X("DOMAIN:N", title="Domain", axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("Score:Q", title="Average Score", scale=alt.Scale(domain=[0, 100])),
             color=alt.Color("DOMAIN:N", legend=None),
             column=alt.Column(
                 "Dimension:N",
                 sort=[name for _, name, _ in DIMENSIONS],
-                header=alt.Header(labelAngle=-30, labelAlign="right", labelFontSize=10),
+                header=alt.Header(labelAngle=0, labelAlign="right", labelFontSize=10),
             ),
             tooltip=["DOMAIN", "Dimension", alt.Tooltip("Score:Q", format=".1f")],
         )
-        .properties(width=70, height=260)
+        .properties(width=120, height=300)
     )
-    st.altair_chart(bar, use_container_width=False)
+    st.altair_chart(bar, width='content')
 
 
 # --------------------------------------------------------------------------
@@ -380,7 +410,7 @@ def _tier_color_for(score: float) -> str:
 
 
 def render_detail() -> None:
-    st.subheader("Dataset detail")
+    st.subheader("Dataset Detail")
     if dq_latest.empty:
         st.info("No datasets match the current filters.")
         return
@@ -399,7 +429,7 @@ def render_detail() -> None:
     with h1:
         st.markdown(f"### {dataset_name}")
         st.markdown(
-            f"<span class='small-muted'>{row['DATASET_FQN']} &middot; "
+            f"<span style='color:#39FF14;' class='small-muted'>{row['DATASET_FQN']} &middot; "
             f"{row['DOMAIN']} &middot; {row['LAYER']}</span>",
             unsafe_allow_html=True,
         )
@@ -450,7 +480,7 @@ def render_detail() -> None:
     breakdown = pd.DataFrame(rows_out)
     st.dataframe(
         breakdown,
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         column_config={
             "Weight": st.column_config.NumberColumn("Weight %", format="%.0f"),
@@ -494,27 +524,39 @@ def render_detail() -> None:
         .mark_rule(strokeDash=[3, 3])
         .encode(y="y:Q", color=alt.Color("color:N", scale=None, legend=None))
     )
-    st.altair_chart(base + rules, use_container_width=True)
+    st.altair_chart(base + rules, width='stretch')
 
-    # Per-dimension trend (small multiples) ------------------------------
+    # Per-dimension trend (single selection) ------------------------------
     st.markdown("**Per-dimension trend**")
-    dim_trend = dim_long[dim_long["DATASET_ID"] == row["DATASET_ID"]]
-    facet = (
-        alt.Chart(dim_trend)
-        .mark_line()
-        .encode(
-            x=alt.X("SCORE_RUN_DATE:T", title=""),
-            y=alt.Y("SCORE:Q", scale=alt.Scale(domain=[0, 100]), title=""),
-            color=alt.Color("DIMENSION_NAME:N", legend=None),
-            tooltip=["DIMENSION_NAME", "SCORE_RUN_DATE", alt.Tooltip("SCORE:Q", format=".1f")],
-        )
-        .properties(width=140, height=110)
-        .facet(
-            facet=alt.Facet("DIMENSION_NAME:N", header=alt.Header(labelFontSize=10)),
-            columns=5,
-        )
+
+    dim_trend = dim_long[dim_long["DATASET_ID"] == row["DATASET_ID"]].copy()
+    dimensions = sorted(dim_trend["DIMENSION_NAME"].dropna().unique())
+
+    selected_dim = st.selectbox(
+        "Choose a dimension",
+        options=dimensions,
+        key=f"dim_selector_{row['DATASET_ID']}",
     )
-    st.altair_chart(facet, use_container_width=False)
+
+    filtered = dim_trend[dim_trend["DIMENSION_NAME"] == selected_dim]
+
+    single_trend = (
+        alt.Chart(filtered)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("SCORE_RUN_DATE:T", title="Run Date", axis=alt.Axis(format="%d %b %Y")),
+            y=alt.Y("SCORE:Q", scale=alt.Scale(domain=[0, 100]), title="Score"),
+            color=alt.Color("DIMENSION_NAME:N", legend=None),
+            tooltip=[
+                alt.Tooltip("DIMENSION_NAME:N", title="Dimension"),
+                alt.Tooltip("SCORE_RUN_DATE:T", title="Run date"),
+                alt.Tooltip("SCORE:Q", format=".1f", title="Score"),
+            ],
+        )
+        .properties(width=260, height=260)
+    )
+
+    st.altair_chart(single_trend, width='stretch')
 
     # Sub-fact tables ----------------------------------------------------
     a, b = st.columns(2)
@@ -550,8 +592,44 @@ def render_detail() -> None:
                     "NULL_PCT": "Null %",
                 }
             )
+            bool_cols = ["Required", "In schema", "Has definition"]
+            for col in bool_cols:
+                display[col] = display[col].map({True: "Yes", False: "No"}).fillna("Unknown")
+
             display["Null %"] = (display["Null %"] * 100).round(2)
-            st.dataframe(display, use_container_width=True, hide_index=True)
+
+            def style_bool(v: str) -> str:
+                if v == "Yes":
+                    return "color:#0B6E3D; background-color:#EAF7EE; font-weight:700;"
+                if v == "No":
+                    return "color:#8A1525; background-color:#FDECEE; font-weight:700;"
+                return "color:#475569; background-color:#F8FAFC; font-weight:600;"
+
+            def style_null_pct(v: float) -> str:
+                if pd.isna(v):
+                    return ""
+                if v >= 20:
+                    return "color:#7A0612; background-color:#FDECEE; font-weight:700;"
+                if v >= 5:
+                    return "color:#8A5A00; background-color:#FFF7E6; font-weight:700;"
+                return "color:#0B6E3D; background-color:#EAF7EE; font-weight:700;"
+
+            def style_string(v: str) -> str:
+                if v == "Yes":
+                    return "color:#0B6E3D; background-color:#EAF7EE; font-weight:700;"
+                if v == "No":
+                    return "color:#8A1525; background-color:#FDECEE; font-weight:700;"
+                return "color:#475569; background-color:#F8FAFC; font-weight:600;"
+
+            styled = (
+                display.style
+                .map(style_string, subset=["Field", "Role"])
+                .map(style_bool, subset=bool_cols)
+                .map(style_null_pct, subset=["Null %"])
+                .format({"Null %": "{:.2f}%"})
+            )
+
+            st.dataframe(styled, width='stretch', hide_index=True)
 
 
 # --------------------------------------------------------------------------
@@ -559,33 +637,43 @@ def render_detail() -> None:
 # --------------------------------------------------------------------------
 
 CORTEX_DQ_HOWTO = """
-This page reads from `SNOWFLAKE.LOCAL.DATA_QUALITY_MONITORING_RESULTS` via two
-bridge views. To enable it on a table in this POC schema, run these files
-in a Snowflake worksheet (in order):
+This page reads live measurements from `VW_PNC_DMF_LATEST_MEASUREMENTS` and
+`VW_PNC_DMF_DIMENSION_SCORES`. Two interchangeable tracks populate them:
+
+**Track A — native Snowflake Cortex DQ** (cleanest, but ACCOUNTADMIN must
+grant `EXECUTE DATA METRIC FUNCTION` + `SNOWFLAKE.DATA_METRIC_USER` to the
+working role).
 
 ```
-ddl/20_cortex_dq_setup.sql               -- demo table + 5 attached DMFs
-ddl/21_pnc_dmf_dataset_map.sql           -- physical-to-logical bridge tables
-ddl/22_vw_pnc_dmf_dimension_scores.sql   -- bridge views the app reads
+ddl/20_cortex_dq_setup.sql               -- attach 9 + 6 native DMFs
+ddl/21_pnc_dmf_dataset_map.sql           -- physical->logical bridge
+ddl/22_vw_pnc_dmf_dimension_scores.sql   -- bridge views this page reads
 ddl/seed/22a_seed_pnc_dmf_dataset_map.sql
 ```
 
-After the first scheduled DMF run (~5 minutes, or trigger immediately by
-calling each DMF inline -- see Section D of file 20), this page will populate.
+**Track B — manual SQL fallback** (no ACCOUNTADMIN required; computes the
+same 15 metrics in plain SQL inside a stored procedure). Use this when
+your role can't get the native-DMF privileges granted.
 
-Prerequisites flagged in file 20: `SNOWFLAKE.DATA_METRIC_USER` +
-`SNOWFLAKE.CORTEX_USER` granted to `DATA_CLEAN_ROOM_ROLE`, and
-`mistral-7b` / `llama3.1-8b` on the model allowlist (only required for
-the Cortex AI-suggestion path).
+```
+ddl/25_manual_dmf_fallback.sql           -- SP + measurements table
+ddl/21_pnc_dmf_dataset_map.sql
+ddl/22_vw_pnc_dmf_dimension_scores.sql
+ddl/seed/22a_seed_pnc_dmf_dataset_map.sql
+```
+
+To refresh measurements at any time:
+`CALL ASATTAR_TRUST_SCORE_POC.DQ_POC.SP_COMPUTE_DQ_MEASUREMENTS();`
 """
 
 
 def render_cortex_dq() -> None:
     st.subheader("Cortex Data Quality (DMF-derived dimensions)")
     st.caption(
-        "Live measurements from Snowflake's native Data Metric Functions, "
-        "bridged into Trust Score dimensions 3 (Active Issues), 4 (Timeliness), "
-        "5 (Completeness of Key Properties), and 6 (Data Profiling)."
+        "Live measurements from Snowflake Data Metric Functions (or the "
+        "manual SP fallback), bridged into Trust Score dimensions 3 (Active "
+        "Issues), 4 (Timeliness), 5 (Completeness of Key Properties), and "
+        "6 (Data Profiling)."
     )
 
     if not _running_in_snowflake():
@@ -594,7 +682,7 @@ def render_cortex_dq() -> None:
             "Streamlit in Snowflake (SiS). Locally the bridge views don't "
             "exist, so this page is read-only documentation."
         )
-        with st.expander("How to enable on a table", expanded=True):
+        with st.expander("How to enable", expanded=True):
             st.markdown(CORTEX_DQ_HOWTO)
         return
 
@@ -606,16 +694,18 @@ def render_cortex_dq() -> None:
             "The bridge views (`VW_PNC_DMF_LATEST_MEASUREMENTS`, "
             "`VW_PNC_DMF_DIMENSION_SCORES`) aren't in this schema yet."
         )
-        with st.expander("How to enable on a table", expanded=True):
+        with st.expander("How to enable", expanded=True):
             st.markdown(CORTEX_DQ_HOWTO)
         return
 
     if measurements.empty:
         st.warning(
-            "Bridge views exist but no DMF measurements have landed yet. "
-            "If you just attached DMFs, the first scheduled run may take "
-            "up to 5 minutes. To trigger an instant measurement, run the "
-            "inline DMF queries in Section D of `ddl/20_cortex_dq_setup.sql`."
+            "Bridge views exist but no measurements have landed yet. "
+            "Track A: the first scheduled DMF run may take up to 5 minutes; "
+            "trigger an instant reading via the inline scans in Section E "
+            "of `ddl/20_cortex_dq_setup.sql`. "
+            "Track B: run "
+            "`CALL ASATTAR_TRUST_SCORE_POC.DQ_POC.SP_COMPUTE_DQ_MEASUREMENTS();`"
         )
         return
 
@@ -678,7 +768,7 @@ def render_cortex_dq() -> None:
         "Hours late", format="%.1f"
     )
     st.dataframe(
-        display, use_container_width=True, hide_index=True, column_config=column_config
+        display, width='stretch', hide_index=True, column_config=column_config
     )
 
     st.divider()
@@ -704,15 +794,16 @@ def render_cortex_dq() -> None:
     )
 
     def _row_style(row: pd.Series) -> list[str]:
+        # Light pastels with dark text -- legible on either light or dark theme.
         if row.get("STATUS") == "FAIL":
-            return ["background-color:#FDECEC"] * len(row)
+            return ["background-color:#FDECEE; color:#8A1525; font-weight:600"] * len(row)
         if row.get("STATUS") == "PASS":
-            return ["background-color:#EAF6EC"] * len(row)
+            return ["background-color:#EAF7EE; color:#0B6E3D; font-weight:600"] * len(row)
         return [""] * len(row)
 
     st.dataframe(
         raw_display.style.apply(_row_style, axis=1),
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
     )
 
@@ -747,7 +838,7 @@ def render_cortex_dq() -> None:
         cmp_df = pd.DataFrame(compare_rows)
         st.dataframe(
             cmp_df,
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             column_config={
                 "DMF-derived":         st.column_config.ProgressColumn("DMF-derived",         min_value=0, max_value=100, format="%.1f"),
@@ -773,7 +864,7 @@ def render_cortex_dq() -> None:
 # --------------------------------------------------------------------------
 
 def render_methodology() -> None:
-    st.subheader("Methodology & weights")
+    st.subheader("Methodology & Weights")
     st.markdown(
         "The Trust Score is a weighted average of 10 dimensions. Weights, "
         "thresholds, and tier cut-points are stored in "
@@ -786,7 +877,7 @@ def render_methodology() -> None:
         st.markdown("**Weights (sum = 100)**")
         st.dataframe(
             weights[["DIMENSION_CODE", "DIMENSION_NAME", "WEIGHT_PCT"]],
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             column_config={
                 "DIMENSION_CODE": "Code",
@@ -804,7 +895,7 @@ def render_methodology() -> None:
             )
             .properties(height=320)
         )
-        st.altair_chart(donut, use_container_width=True)
+        st.altair_chart(donut, width='stretch')
 
     with c2:
         st.markdown("**Per-dimension status thresholds**")
