@@ -1,27 +1,32 @@
 """
-Data Trust Score - Streamlit dashboard.
+DEPRECATED -- this app has been split into two focused apps.
 
-Runs in two environments:
+Run one of:
 
-  1. Streamlit in Snowflake (SiS, including Workspaces): pulls data live
-     from ASATTAR_TRUST_SCORE_POC.DQ_POC via the active Snowpark session.
-  2. Local development: falls back to the CSVs in ../data/ produced by
-     ../synthetic/generate_synthetic.py.
+    streamlit run app/trust_score_app.py       # Trust Score governance surface
+    streamlit run app/ai_use_cases_app.py      # AI use cases / operational
 
-The two paths are isolated in the load_*() functions; everything below is
-shared.
+For Streamlit in Snowflake (SiS), deploy each entry-point separately so the
+two audiences see only what they need:
 
-Charting uses altair (pre-installed in the SiS runtime, no EAI required).
+  - trust_score_app.py     -> "P&C Data Trust Score" app
+                              Pages: Portfolio Scorecard, Dataset Detail,
+                                     Methodology & Weights
+  - ai_use_cases_app.py    -> "P&C HR Analytics & Data Quality" app
+                              Pages: Cortex DQ, Workforce Shifts, TA Analytics
+
+Shared loaders, constants, and CSS live in `shared.py` so the split adds no
+divergence -- each app imports the same functions.
+
+This file remains as a thin redirect so anyone with a stale path or
+SiS deployment pointing here gets a clear next step.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import altair as alt
-import pandas as pd
 import streamlit as st
 
+<<<<<<< Updated upstream
 try:
     from snowflake.snowpark.context import get_active_session
     _SNOWPARK_AVAILABLE = True
@@ -134,37 +139,27 @@ def load_weights() -> pd.DataFrame:
 # Page setup
 # --------------------------------------------------------------------------
 
+=======
+>>>>>>> Stashed changes
 st.set_page_config(
-    page_title="P&C Data Trust Score (Prototype)",
+    page_title="App split -- choose one",
     page_icon=":bar_chart:",
-    layout="wide",
+    layout="centered",
 )
+
+st.title("This app has been split")
 
 st.markdown(
     """
-    <style>
-        .tier-pill {
-            display:inline-block; padding:4px 12px; border-radius:14px;
-            color:white; font-weight:600; font-size:0.85rem;
-        }
-        .small-muted { color:#666; font-size:0.85rem; }
-        .stMetric label { font-size:0.85rem !important; }
-        .score-bar {
-            height: 14px; border-radius: 7px; background: #eee; overflow: hidden;
-            margin-top: 6px;
-        }
-        .score-bar > div { height: 100%; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+The single combined app has been replaced with two focused apps so each
+audience sees only what's relevant:
 
-st.title("P&C Data Trust Score")
-st.caption(
-    "Prototype on synthetic data. Mirrors proposed extension to "
-    "`PNC_DQ_RESULTS` + 4 net-new registries (per Reuse Assessment, May 2026)."
-)
+| App | Audience | Pages |
+|---|---|---|
+| **Data Trust Score** (`app/trust_score_app.py`) | Governance, leadership, data-quality on-call | Portfolio Scorecard, Dataset Detail, Cortex DQ, Methodology & Weights |
+| **HR Analytics (AI use cases)** (`app/ai_use_cases_app.py`) | Workforce ops, TA | Workforce Shifts, TA Analytics |
 
+<<<<<<< Updated upstream
 
 # --------------------------------------------------------------------------
 # Sidebar: filters & nav
@@ -601,3 +596,35 @@ elif page == "Dataset Detail":
     render_detail()
 else:
     render_methodology()
+=======
+Both share the same underlying tables and a single `shared.py` module --
+no divergence over time.
+"""
+)
+
+st.divider()
+
+st.markdown("### Run locally")
+st.code(
+    "streamlit run app/trust_score_app.py     # governance surface\n"
+    "streamlit run app/ai_use_cases_app.py    # operational analytics",
+    language="bash",
+)
+
+st.markdown("### Deploy to Streamlit in Snowflake (SiS)")
+st.markdown(
+    "Create **two** SiS apps from the `app/` folder, with entry points "
+    "`trust_score_app.py` and `ai_use_cases_app.py` respectively. Each app "
+    "is fully self-contained -- they only share `shared.py` (auto-loaded "
+    "from the same folder)."
+)
+
+st.markdown("### Reference")
+st.markdown(
+    "- See the README's *Running locally* and *Deploying to Snowflake* "
+    "sections for the full instructions.\n"
+    "- See `docs/PORTFOLIO_AND_DETAIL_PAGES.md` for the Trust Score page "
+    "guide.\n"
+    "- See `docs/REAL_DATA_OPPORTUNITIES.md` for the AI-use-case roadmap."
+)
+>>>>>>> Stashed changes
