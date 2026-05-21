@@ -1,0 +1,47 @@
+-------------------------------------------------------------------------------
+-- Target: main/DDL/EDLE_DW_DB/PNC_DATA_TRUST/VW_PNC_DMF_DIMENSION_SCORES.sql
+--
+-- Rolls up latest DMF pass/fail into trust dimensions 3–6 for side-by-side
+-- comparison with PNC_DQ_RESULTS in Streamlit.
+-------------------------------------------------------------------------------
+
+USE ROLE PNC_DEVELOPER_RL;
+USE DATABASE EDLE_DW_DB;
+USE SCHEMA PNC_DATA_TRUST;
+USE WAREHOUSE PNC_AIML_WH;
+
+CREATE OR REPLACE VIEW EDLE_DW_DB.PNC_DATA_TRUST.VW_PNC_DMF_DIMENSION_SCORES AS
+WITH latest AS (
+    SELECT *
+    FROM EDLE_DW_DB.PNC_DATA_TRUST.VW_PNC_DMF_LATEST_MEASUREMENTS
+),
+mapped AS (
+    SELECT
+        c.DATASET_ID,
+        c.DATASET_NAME,
+        CASE
+            WHEN l.METRIC_NAME ILIKE '%FRESH%' THEN 'TIMELINESS'
+            WHEN l.METRIC_NAME ILIKE '%NULL%'  THEN 'COMPLETENESS_KEY_PROPS'
+            WHEN l.METRIC_STATUS = 'FAIL'      THEN 'ACTIVE_ISSUES'
+            ELSE 'DATA_PROFILING'
+        END AS DIMENSION_CODE,
+        l.METRIC_STATUS,
+        l.METRIC_VALUE,
+        l.MEASUREMENT_TIME
+    FROM latest l
+    JOIN EDLE_DW_DB.PNC_DATA_TRUST.PNC_DATASET_CATALOG c
+      ON c.DATASET_FQN = l.TABLE_FQN
+)
+SELECT
+    DATASET_ID,
+    DATASET_NAME,
+    DIMENSION_CODE,
+    AVG(IFF(METRIC_STATUS = 'PASS', 100, 0)) AS DIMENSION_SCORE,
+    MAX(MEASUREMENT_TIME)                    AS COMPUTED_AT
+FROM mapped
+GROUP BY DATASET_ID, DATASET_NAME, DIMENSION_CODE;
+
+GRANT SELECT ON VIEW EDLE_DW_DB.PNC_DATA_TRUST.VW_PNC_DMF_DIMENSION_SCORES
+    TO ROLE PNC_AIML_DEVELOPER_RL;
+
+-- [TODO] Replace heuristic CASE with explicit PNC_DMF_METRIC_MAP table when scale grows.

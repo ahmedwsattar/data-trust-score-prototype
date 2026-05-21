@@ -1,0 +1,29 @@
+-------------------------------------------------------------------------------
+-- Target: main/DDL/EDLE_DW_DB/PNC_DATA_TRUST/PNC_SOURCE_CLASSIFICATION.sql
+--
+-- Dimension #2 (Data Source) + SLA inputs for Timeliness scoring.
+-------------------------------------------------------------------------------
+
+USE ROLE PNC_DEVELOPER_RL;
+USE DATABASE EDLE_DW_DB;
+USE SCHEMA PNC_DATA_TRUST;
+USE WAREHOUSE PNC_AIML_WH;
+
+CREATE OR REPLACE TABLE EDLE_DW_DB.PNC_DATA_TRUST.PNC_SOURCE_CLASSIFICATION (
+    DATASET_ID            VARCHAR(64)   PRIMARY KEY,
+    DATASET_NAME          VARCHAR(255)  NOT NULL,
+    DATASET_FQN           VARCHAR(512)  NOT NULL,
+    SOURCE_SYSTEM         VARCHAR(128)  NOT NULL,
+    SOURCE_DOMAIN         VARCHAR(64)   NOT NULL,
+    LAYER                 VARCHAR(32),
+    CLASSIFICATION_TIER   VARCHAR(16)   NOT NULL,
+    IS_APM_REGISTERED     BOOLEAN       NOT NULL DEFAULT FALSE,
+    IS_SOX_RELEVANT       BOOLEAN       NOT NULL DEFAULT FALSE,
+    LOAD_FREQUENCY        VARCHAR(32),
+    SLA_HOURS             NUMBER(6,2),
+    CREATED_AT            TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_AT            TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_BY            VARCHAR(128)
+);
+
+-- [TODO] Seed DS_POSITION_REPORT / DS_TRENDED_REPORT rows (see POC ddl/seed/91b).
