@@ -1,21 +1,18 @@
 """
-P&C Data Trust Score -- governance + DQ measurement surface.
+P&C Data Trust Score (v2) -- governance + DQ measurement surface.
 
-Four pages:
+Reads the live DTS_ objects in EDLE_DW_DB.PNC_DATA. Four pages:
 
-  1. Portfolio Scorecard   -- 10-dim heatmap + tier ranking + domain rollup
-  2. Dataset Detail        -- per-dataset drill-down
-  3. Cortex DQ             -- live DMF measurements bridged to dims 3/4/5/6
-  4. Methodology & Weights -- weights, thresholds, governance reference
+  1. Portfolio Scorecard  -- all scored objects (family x layer): trust score,
+                             band, measurable ceiling, foundational-gap flag.
+  2. Dataset Detail       -- one object: dimension breakdown (weight x raw x
+                             confidence), CDE elements, ceiling/gap.
+  3. Lineage DQ           -- INT -> DW -> PUBL comparison per report family;
+                             DQ + Observability measured per layer via DMFs.
+  4. Methodology          -- weights, bands, confidence factors, DAMA, CDE.
 
-Cortex DQ lives here because it's the *measurement engine* for four trust
-dimensions. Sister app `ai_use_cases_app.py` hosts the applied AI/analytics
-use cases (Workforce Shifts, TA Analytics).
-
-Shared loaders, constants, and CSS live in `shared.py`.
-
-Local dev:    streamlit run app/trust_score_app.py
-SiS deploy:   upload as a Streamlit app from app/ (entry: trust_score_app.py)
+Shared loaders/constants/CSS live in shared.py; framework values in config.py.
+v2 is Snowflake-first: locally each page shows an enablement banner.
 """
 
 from __future__ import annotations
@@ -24,776 +21,339 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+import config
 from shared import (
     DIMENSIONS,
+    LAYER_ORDER,
     SCORE_COLOR_SCALE,
-    TIER_COLOR,
     apply_global_css,
+    band_color_for,
+    enablement_banner,
+    load_confidence_factors,
+    load_data_elements,
     load_dmf_dimension_scores,
-    load_dmf_measurements,
-    load_dq_dimension_results,
-    load_dq_results,
-    load_keys,
-    load_ownership,
-    load_source_classification,
+    load_element_dimension_scores,
+    load_lineage,
+    load_trust_scores,
     load_weights,
-    tier_color_for,
     _running_in_snowflake,
 )
 
-
-# --------------------------------------------------------------------------
-# Page setup
-# --------------------------------------------------------------------------
-
-st.set_page_config(
-    page_title="P&C Data Trust Score",
-    page_icon=":bar_chart:",
-    layout="wide",
-)
+st.set_page_config(page_title="P&C Data Trust Score v2", page_icon=":bar_chart:", layout="wide")
 apply_global_css()
 
 st.title("P&C Data Trust Score")
 st.caption(
-    "Governance surface for the 10-dimension trust score framework. "
-    "Mirrors the proposed extension to `PNC_DQ_RESULTS` + 4 net-new "
-    "registries (per Reuse Assessment, May 2026)."
+    "v2 -- 10-dimension trust score measured per layer (INT → DW → PUBL) with "
+    "live Snowflake DMFs, DQ confidence factor, CDE weighting, and "
+    "measurable-ceiling / foundational-gap tracking."
 )
 
-
 # --------------------------------------------------------------------------
-# Data loading
+# Sidebar nav
 # --------------------------------------------------------------------------
-
-dq         = load_dq_results()
-ownership  = load_ownership()
-src        = load_source_classification()
-keys       = load_keys()
-weights    = load_weights()
-dim_long   = load_dq_dimension_results()
-
-latest_date = dq["SCORE_RUN_DATE"].max()
-
-
-# --------------------------------------------------------------------------
-# Sidebar: nav + filters
-# --------------------------------------------------------------------------
-
 with st.sidebar:
     st.header("Navigation")
     page = st.selectbox(
         "View",
-        [
-            "Portfolio Scorecard",
-            "Dataset Detail",
-            "Cortex DQ",
-            "Methodology & Weights",
-        ],
+        ["Portfolio Scorecard", "Dataset Detail", "Lineage DQ", "Methodology"],
         label_visibility="collapsed",
     )
-    st.divider()
-    st.header("Filters")
-    domain_options = sorted(dq["DOMAIN"].unique())
-    domain_filter  = st.multiselect("Domain", domain_options, default=domain_options)
-    tier_options   = ["GOLD", "SILVER", "BRONZE", "AT_RISK"]
-    tier_filter    = st.multiselect("Tier", tier_options, default=tier_options)
-    st.caption(f"As-of: **{pd.Timestamp(latest_date).date()}**")
-    st.caption(
-        f"Source: {'Snowflake' if _running_in_snowflake() else 'local CSV'}"
-    )
-    st.divider()
-    st.caption(
-        "Applied analytics (Workforce Shifts, TA Analytics) live in the "
-        "**AI Use Cases** app."
-    )
+    st.caption(f"Namespace: `{config.TARGET_NS}`")
+    st.caption(f"Source: {'Snowflake (live)' if _running_in_snowflake() else 'local (no live data)'}")
 
-dq_latest = dq[dq["SCORE_RUN_DATE"] == latest_date]
-dq_latest = dq_latest[dq_latest["DOMAIN"].isin(domain_filter)]
-dq_latest = dq_latest[dq_latest["TRUST_SCORE_TIER"].isin(tier_filter)]
+scores = load_trust_scores()
+
+
+def _fmt_gaps(v) -> str:
+    if isinstance(v, (list, tuple)):
+        return ", ".join(v) if len(v) else "-"
+    if isinstance(v, str) and v not in ("", "[]"):
+        return v
+    return "-"
 
 
 # --------------------------------------------------------------------------
 # Page 1 -- Portfolio Scorecard
 # --------------------------------------------------------------------------
-
 def render_portfolio() -> None:
     st.subheader("Portfolio scorecard")
-    if dq_latest.empty:
-        st.info("No datasets match the current filters.")
+    if scores is None:
+        enablement_banner(["DTS_VW_DATASET_TRUST_SCORE_LATEST"])
+        return
+    if scores.empty:
+        st.warning("No scores yet. Run `CALL SP_DTS_COMPUTE_SCORES();` after deploying + measuring.")
         return
 
-    # KPI strip ----------------------------------------------------------
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Datasets in scope", f"{dq_latest['DATASET_ID'].nunique()}")
-    c2.metric("Avg Trust Score", f"{dq_latest['TRUST_SCORE_OVERALL'].mean():.1f}")
-    c3.metric("Gold tier", int((dq_latest["TRUST_SCORE_TIER"] == "GOLD").sum()))
-    c4.metric(
-        "At-Risk tier",
-        int((dq_latest["TRUST_SCORE_TIER"] == "AT_RISK").sum()),
-        delta_color="inverse",
-    )
-    open_p1 = int(dq_latest["DIM_ISSUES_OPEN_P1"].sum())
-    c5.metric("Open P1 issues (sum)", open_p1, delta_color="inverse")
+    c1.metric("Objects scored", len(scores))
+    c2.metric("Avg trust score", f"{scores['TRUST_SCORE'].mean():.1f}")
+    c3.metric("Certified", int((scores["TRUST_BAND"] == "CERTIFIED").sum()))
+    c4.metric("At risk", int((scores["TRUST_BAND"] == "AT_RISK").sum()), delta_color="inverse")
+    c5.metric("Foundational gaps", int(scores["FOUNDATIONAL_GAP_FLAG"].sum()), delta_color="inverse")
 
     st.divider()
 
-    left, right = st.columns([1.7, 0.25])
-
-    # Heatmap: datasets x dimensions -------------------------------------
-    with left:
-        st.markdown("**10-dimension heatmap (latest scores)**")
-        heatmap_cols = [c for _, _, c in DIMENSIONS]
-        label_map    = {c: name for _, name, c in DIMENSIONS}
-        melt = dq_latest.melt(
-            id_vars=["DATASET_NAME"],
-            value_vars=heatmap_cols,
-            var_name="dim_col",
-            value_name="Score",
+    # Heatmap: family x layer trust score
+    st.markdown("**Trust score by report family x layer**")
+    heat_df = scores.copy()
+    heat_df["LAYER"] = pd.Categorical(heat_df["LAYER"], categories=LAYER_ORDER, ordered=True)
+    heat = (
+        alt.Chart(heat_df)
+        .mark_rect()
+        .encode(
+            x=alt.X("LAYER:N", sort=LAYER_ORDER, axis=alt.Axis(orient="top", labelAngle=0)),
+            y=alt.Y("REPORT_FAMILY:N", title="Report family"),
+            color=alt.Color("TRUST_SCORE:Q", scale=SCORE_COLOR_SCALE, legend=alt.Legend(title="Trust score")),
+            tooltip=["REPORT_FAMILY", "LAYER", alt.Tooltip("TRUST_SCORE:Q", format=".1f"),
+                     "TRUST_BAND", alt.Tooltip("MEASURABLE_CEILING:Q", format=".0f")],
         )
-        melt["Dimension"] = melt["dim_col"].map(label_map)
-
-        heat = (
-            alt.Chart(melt)
-            .mark_rect()
-            .encode(
-                x=alt.X(
-                    "Dimension:N",
-                    sort=[name for _, name, _ in DIMENSIONS],
-                    axis=alt.Axis(orient="top", labelAngle=0, labelFontSize=11, labelAlign="center"),
-                ),
-                y=alt.Y(
-                    "DATASET_NAME:N",
-                    title="Dataset Title",
-                    axis=alt.Axis(labelFontSize=10, labelAlign="right"),
-                ),
-                color=alt.Color("Score:Q", scale=SCORE_COLOR_SCALE, legend=alt.Legend(title="Score")),
-                tooltip=["DATASET_NAME", "Dimension", alt.Tooltip("Score:Q", format=".1f")],
-            )
-            .properties(height=50 * dq_latest["DATASET_NAME"].nunique() + 40)
-        )
-        text = (
-            alt.Chart(melt)
-            .mark_text(fontWeight="bold")
-            .encode(
-                x=alt.X("Dimension:N", sort=[name for _, name, _ in DIMENSIONS]),
-                y="DATASET_NAME:N",
-                text=alt.Text("Score:Q", format=".0f"),
-                color=alt.condition(
-                    alt.datum.Score >= 90,
-                    alt.value("#111827"),
-                    alt.value("#F9FAFB"),
-                ),
-            )
-        )
-        st.altair_chart(heat + text, use_container_width=True)
-
-    # Data Sources mini-list ---------------------------------------------
-    with right:
-        st.markdown("**Data Sources**")
-        sources = (
-            dq_latest[["DATASET_NAME", "DOMAIN"]]
-            .sort_values("DATASET_NAME", ascending=True)
-            .reset_index(drop=True)
-        )
-        sources.columns = ["Dataset", "Domain"]
-        st.dataframe(
-            sources,
-            use_container_width=True,
-            height=50 * dq_latest["DATASET_NAME"].nunique() + 40,
-            hide_index=True,
-        )
+        .properties(height=60 * heat_df["REPORT_FAMILY"].nunique() + 40)
+    )
+    text = (
+        alt.Chart(heat_df).mark_text(fontWeight="bold")
+        .encode(x=alt.X("LAYER:N", sort=LAYER_ORDER), y="REPORT_FAMILY:N",
+                text=alt.Text("TRUST_SCORE:Q", format=".0f"),
+                color=alt.condition(alt.datum.TRUST_SCORE >= 75, alt.value("#111827"), alt.value("#F9FAFB")))
+    )
+    st.altair_chart(heat + text, use_container_width=True)
 
     st.divider()
 
-    # Tier ranking -------------------------------------------------------
-    st.markdown("**Trust tier ranking**")
-    ranking = (
-        dq_latest[
-            [
-                "DATASET_NAME",
-                "DOMAIN",
-                "TRUST_SCORE_OVERALL",
-                "TRUST_SCORE_TIER",
-                "DIM_ISSUES_OPEN_P1",
-                "DIM_TIMELINESS_HOURS_LATE",
-            ]
-        ]
-        .sort_values("TRUST_SCORE_OVERALL", ascending=False)
-        .reset_index(drop=True)
-    )
-    ranking.columns = ["Dataset", "Domain", "Score", "Tier", "P1 issues", "Hours late"]
+    # Ranking table
+    st.markdown("**Scored objects**")
+    tbl = scores[["REPORT_FAMILY", "LAYER", "DQ_MEASUREMENT_LAYER", "TRUST_SCORE",
+                  "TRUST_BAND", "MEASURABLE_CEILING", "FOUNDATIONAL_GAP_FLAG",
+                  "FOUNDATIONAL_GAPS"]].copy()
+    tbl["FOUNDATIONAL_GAPS"] = tbl["FOUNDATIONAL_GAPS"].map(_fmt_gaps)
+    tbl = tbl.sort_values("TRUST_SCORE", ascending=False).reset_index(drop=True)
+    tbl.columns = ["Family", "Layer", "Confidence tier", "Score", "Band",
+                   "Ceiling", "Gap?", "Missing foundational"]
     st.dataframe(
-        ranking,
-        use_container_width=True,
-        hide_index=True,
+        tbl, use_container_width=True, hide_index=True,
         column_config={
-            "Score": st.column_config.ProgressColumn(
-                "Score", min_value=0, max_value=100, format="%.1f"
-            ),
-            "Tier": st.column_config.TextColumn("Tier"),
-            "Hours late": st.column_config.NumberColumn("Hours late", format="%.1f"),
+            "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%.1f"),
+            "Ceiling": st.column_config.NumberColumn("Ceiling", format="%.0f"),
         },
     )
-
-    st.divider()
-
-    # Domain rollup ------------------------------------------------------
-    st.markdown("**Average score by dimension and domain**")
-    label_map = {c: name for _, name, c in DIMENSIONS}
-    melt2 = dq_latest.melt(
-        id_vars=["DATASET_NAME", "DOMAIN"],
-        value_vars=[c for _, _, c in DIMENSIONS],
-        var_name="dim_col",
-        value_name="Score",
+    st.caption(
+        "**Ceiling** = sum of dimension weights measurable today (DMF-backed + "
+        "seeded). Scores can't exceed the ceiling until the remaining dimensions "
+        "are seeded. **Gap?** flags an unseeded foundational dimension."
     )
-    melt2["Dimension"] = melt2["dim_col"].map(label_map)
-    grouped = melt2.groupby(["DOMAIN", "Dimension"], as_index=False)["Score"].mean()
-
-    bar = (
-        alt.Chart(grouped)
-        .mark_bar()
-        .encode(
-            x=alt.X("DOMAIN:N", title="Domain", axis=alt.Axis(labelAngle=0)),
-            y=alt.Y("Score:Q", title="Average Score", scale=alt.Scale(domain=[0, 100])),
-            color=alt.Color("DOMAIN:N", legend=None),
-            column=alt.Column(
-                "Dimension:N",
-                sort=[name for _, name, _ in DIMENSIONS],
-                header=alt.Header(labelAngle=0, labelAlign="right", labelFontSize=10),
-            ),
-            tooltip=["DOMAIN", "Dimension", alt.Tooltip("Score:Q", format=".1f")],
-        )
-        .properties(width=120, height=300)
-    )
-    st.altair_chart(bar, use_container_width=False)
 
 
 # --------------------------------------------------------------------------
 # Page 2 -- Dataset Detail
 # --------------------------------------------------------------------------
-
 def render_detail() -> None:
-    st.subheader("Dataset Detail")
-    if dq_latest.empty:
-        st.info("No datasets match the current filters.")
+    st.subheader("Dataset detail")
+    eds = load_element_dimension_scores()
+    weights = load_weights()
+    elements = load_data_elements()
+    if scores is None or eds is None or weights is None:
+        enablement_banner(["DTS_VW_DATASET_TRUST_SCORE_LATEST",
+                           "DTS_ELEMENT_DIMENSION_SCORE", "DTS_DIMENSION_WEIGHTS"])
+        return
+    if scores.empty:
+        st.warning("No scores yet.")
         return
 
-    dataset_name = st.selectbox(
-        "Dataset",
-        sorted(dq_latest["DATASET_NAME"].unique()),
-    )
-    row      = dq_latest[dq_latest["DATASET_NAME"] == dataset_name].iloc[0]
-    own_row  = ownership[ownership["DATASET_ID"] == row["DATASET_ID"]]
-    src_row  = src[src["DATASET_ID"] == row["DATASET_ID"]]
-    key_rows = keys[keys["DATASET_ID"] == row["DATASET_ID"]]
+    scores["KEY"] = scores["REPORT_FAMILY"] + " · " + scores["LAYER"]
+    pick = st.selectbox("Object", scores["KEY"].tolist())
+    row = scores[scores["KEY"] == pick].iloc[0]
+    fam, layer = row["REPORT_FAMILY"], row["LAYER"]
 
-    # Header card --------------------------------------------------------
     h1, h2 = st.columns([2, 1])
     with h1:
-        st.markdown(f"### {dataset_name}")
-        st.markdown(
-            f"<span style='color:#39FF14;' class='small-muted'>{row['DATASET_FQN']} &middot; "
-            f"{row['DOMAIN']} &middot; {row['LAYER']}</span>",
-            unsafe_allow_html=True,
-        )
-        if not own_row.empty:
-            o = own_row.iloc[0]
-            steward = o.get("DATA_STEWARD_NAME") or "**unassigned**"
-            owner   = o.get("BUSINESS_OWNER_NAME") or "**unassigned**"
-            st.markdown(
-                f"**Owner:** {owner}  &nbsp;&nbsp; **Steward:** {steward}  "
-                f"&nbsp;&nbsp; **Status:** {o['ASSIGNMENT_STATUS']}"
-            )
-        if not src_row.empty:
-            s = src_row.iloc[0]
-            st.markdown(
-                f"**Source system:** {s['SOURCE_SYSTEM']}  &nbsp;&nbsp; "
-                f"**Tier:** {s['CLASSIFICATION_TIER']}  &nbsp;&nbsp; "
-                f"**SLA:** {s['SLA_HOURS']:.0f} h  &nbsp;&nbsp; "
-                f"**Cadence:** {s['LOAD_FREQUENCY']}"
-            )
-
+        st.markdown(f"### {fam} · {layer}")
+        st.markdown(f"<span class='small-muted'>{row['DATASET_FQN']} · confidence tier "
+                    f"{row['DQ_MEASUREMENT_LAYER']}</span>", unsafe_allow_html=True)
+        gaps = _fmt_gaps(row["FOUNDATIONAL_GAPS"])
+        if row["FOUNDATIONAL_GAP_FLAG"]:
+            st.markdown(f"<span class='gap-flag'>Foundational gap:</span> {gaps}", unsafe_allow_html=True)
     with h2:
-        score = float(row["TRUST_SCORE_OVERALL"])
-        tier  = row["TRUST_SCORE_TIER"]
-        color = TIER_COLOR.get(tier, "#888")
-        st.metric(label="Trust Score", value=f"{score:.1f} / 100")
+        score = float(row["TRUST_SCORE"])
+        color = band_color_for(score)
+        st.metric("Trust score", f"{score:.1f} / 100")
         st.markdown(
-            f"<div class='score-bar'><div style='width:{score}%; background:{color};'></div></div>"
-            f"<div style='text-align:center; margin-top:8px;'>"
-            f"<span class='tier-pill' style='background:{color}'>{tier}</span>"
-            f"</div>",
+            f"<div class='score-bar'><div style='width:{min(score,100)}%; background:{color};'></div></div>"
+            f"<div style='text-align:center;margin-top:8px;'>"
+            f"<span class='band-pill' style='background:{color}'>{row['TRUST_BAND']}</span></div>",
             unsafe_allow_html=True,
         )
+        st.caption(f"Measurable ceiling: {row['MEASURABLE_CEILING']:.0f}")
 
     st.divider()
 
-    # Dimension breakdown ------------------------------------------------
-    st.markdown("**Dimension breakdown (latest)**")
-    rows_out   = []
-    weight_map = weights.set_index("DIMENSION_CODE")["WEIGHT_PCT"].astype(float).to_dict()
-    for code, name, col in DIMENSIONS:
-        weight     = float(weight_map.get(code, 0))
-        score_v    = float(row[col])
-        status_col = col.replace("_SCORE", "_STATUS")
-        status     = row.get(status_col, "")
-        rows_out.append(
-            dict(Dimension=name, Code=code, Weight=weight, Score=score_v, Status=status)
-        )
-    breakdown = pd.DataFrame(rows_out)
+    # Dimension breakdown for this object
+    st.markdown("**Dimension breakdown**")
+    w = weights.rename(columns={"DIMENSION_CODE": "DIMENSION_CODE"})
+    d = eds[(eds["REPORT_FAMILY"] == fam) & (eds["LAYER"] == layer)].copy()
+    d = d.merge(w[["DIMENSION_CODE", "DIMENSION_LABEL", "WEIGHT"]], on="DIMENSION_CODE", how="right")
+    d["EFFECTIVE"] = (d["RAW_SCORE"].fillna(0) * d["CONFIDENCE_FACTOR"].fillna(1.0))
+    d["CONTRIBUTION"] = d["WEIGHT"] * d["EFFECTIVE"] / 100.0
+    out = d[["DIMENSION_LABEL", "WEIGHT", "RAW_SCORE", "CONFIDENCE_FACTOR",
+             "EFFECTIVE", "CONTRIBUTION", "IS_MEASURABLE"]].copy()
+    out.columns = ["Dimension", "Weight", "Raw", "Confidence", "Effective", "Points", "Measurable"]
+    out = out.sort_values("Weight", ascending=False)
     st.dataframe(
-        breakdown,
-        use_container_width=True,
-        hide_index=True,
+        out, use_container_width=True, hide_index=True,
         column_config={
-            "Weight": st.column_config.NumberColumn("Weight %", format="%.0f"),
-            "Score": st.column_config.ProgressColumn(
-                "Score", min_value=0, max_value=100, format="%.1f"
-            ),
+            "Weight": st.column_config.NumberColumn("Weight", format="%.0f"),
+            "Raw": st.column_config.ProgressColumn("Raw", min_value=0, max_value=100, format="%.0f"),
+            "Confidence": st.column_config.NumberColumn("Conf.", format="%.2f"),
+            "Effective": st.column_config.NumberColumn("Effective", format="%.0f"),
+            "Points": st.column_config.NumberColumn("Points", format="%.1f"),
         },
     )
+    st.caption("Points = Weight × (Raw × Confidence) / 100. DQ and Observability "
+               "carry the per-layer confidence factor; other dimensions use 1.0.")
 
-    # 90-day trend -------------------------------------------------------
-    st.markdown("**90-day trend**")
-    trend = (
-        dq[dq["DATASET_ID"] == row["DATASET_ID"]]
-        .sort_values("SCORE_RUN_DATE")
-        .copy()
-    )
-    base = (
-        alt.Chart(trend)
-        .mark_line(strokeWidth=3, color="#1F4E79")
-        .encode(
-            x=alt.X("SCORE_RUN_DATE:T", title=""),
-            y=alt.Y(
-                "TRUST_SCORE_OVERALL:Q",
-                title="Overall Trust Score",
-                scale=alt.Scale(domain=[0, 100]),
-            ),
-            tooltip=["SCORE_RUN_DATE", alt.Tooltip("TRUST_SCORE_OVERALL:Q", format=".1f")],
-        )
-        .properties(height=300)
-    )
-    rules = (
-        alt.Chart(
-            pd.DataFrame(
-                {
-                    "y": [85, 70, 50],
-                    "label": ["GOLD", "SILVER", "AT_RISK"],
-                    "color": ["#2E7D32", "#9BA4B5", "#C44545"],
-                }
-            )
-        )
-        .mark_rule(strokeDash=[3, 3])
-        .encode(y="y:Q", color=alt.Color("color:N", scale=None, legend=None))
-    )
-    st.altair_chart(base + rules, use_container_width=True)
-
-    # Per-dimension trend ------------------------------------------------
-    st.markdown("**Per-dimension trend**")
-
-    dim_trend  = dim_long[dim_long["DATASET_ID"] == row["DATASET_ID"]].copy()
-    dimensions = sorted(dim_trend["DIMENSION_NAME"].dropna().unique())
-
-    selected_dim = st.selectbox(
-        "Choose a dimension",
-        options=dimensions,
-        key=f"dim_selector_{row['DATASET_ID']}",
-    )
-
-    filtered = dim_trend[dim_trend["DIMENSION_NAME"] == selected_dim]
-
-    single_trend = (
-        alt.Chart(filtered)
-        .mark_line(point=True)
-        .encode(
-            x=alt.X("SCORE_RUN_DATE:T", title="Run Date", axis=alt.Axis(format="%d %b %Y")),
-            y=alt.Y("SCORE:Q", scale=alt.Scale(domain=[0, 100]), title="Score"),
-            color=alt.Color("DIMENSION_NAME:N", legend=None),
-            tooltip=[
-                alt.Tooltip("DIMENSION_NAME:N", title="Dimension"),
-                alt.Tooltip("SCORE_RUN_DATE:T", title="Run date"),
-                alt.Tooltip("SCORE:Q", format=".1f", title="Score"),
-            ],
-        )
-        .properties(width=260, height=260)
-    )
-
-    st.altair_chart(single_trend, use_container_width=True)
-
-    # Sub-fact tables ----------------------------------------------------
-    a, b = st.columns(2)
-    with a:
-        st.markdown("**Active issues (latest snapshot)**")
-        st.metric("Open P1", int(row["DIM_ISSUES_OPEN_P1"]))
-        st.metric("Open P2", int(row["DIM_ISSUES_OPEN_P2"]))
-        st.metric("Open P3", int(row["DIM_ISSUES_OPEN_P3"]))
-        last_failure = row.get("DIM_ISSUES_LAST_FAILURE_AT")
-        if pd.notna(last_failure):
-            st.caption(f"Last failure: {last_failure}")
-    with b:
-        st.markdown("**Key property profiling**")
-        if key_rows.empty:
-            st.info("No key registry rows for this dataset.")
-        else:
-            display = key_rows[
-                [
-                    "KEY_FIELD_NAME",
-                    "KEY_FIELD_ROLE",
-                    "IS_REQUIRED",
-                    "IS_PRESENT_IN_SCHEMA",
-                    "HAS_APPROVED_DEFINITION",
-                    "NULL_PCT",
-                ]
-            ].rename(
-                columns={
-                    "KEY_FIELD_NAME":          "Field",
-                    "KEY_FIELD_ROLE":          "Role",
-                    "IS_REQUIRED":             "Required",
-                    "IS_PRESENT_IN_SCHEMA":    "In schema",
-                    "HAS_APPROVED_DEFINITION": "Has definition",
-                    "NULL_PCT":                "Null %",
-                }
-            )
-            bool_cols = ["Required", "In schema", "Has definition"]
-            for col in bool_cols:
-                display[col] = display[col].map({True: "Yes", False: "No"}).fillna("Unknown")
-
-            display["Null %"] = (display["Null %"] * 100).round(2)
-
-            def style_bool(v: str) -> str:
-                if v == "Yes":
-                    return "color:#0B6E3D; background-color:#EAF7EE; font-weight:700;"
-                if v == "No":
-                    return "color:#8A1525; background-color:#FDECEE; font-weight:700;"
-                return "color:#475569; background-color:#F8FAFC; font-weight:600;"
-
-            def style_null_pct(v: float) -> str:
-                if pd.isna(v):
-                    return ""
-                if v >= 20:
-                    return "color:#7A0612; background-color:#FDECEE; font-weight:700;"
-                if v >= 5:
-                    return "color:#8A5A00; background-color:#FFF7E6; font-weight:700;"
-                return "color:#0B6E3D; background-color:#EAF7EE; font-weight:700;"
-
-            def style_string(v: str) -> str:
-                if v == "Yes":
-                    return "color:#0B6E3D; background-color:#EAF7EE; font-weight:700;"
-                if v == "No":
-                    return "color:#8A1525; background-color:#FDECEE; font-weight:700;"
-                return "color:#475569; background-color:#F8FAFC; font-weight:600;"
-
-            styled = (
-                display.style
-                .map(style_string, subset=["Field", "Role"])
-                .map(style_bool, subset=bool_cols)
-                .map(style_null_pct, subset=["Null %"])
-                .format({"Null %": "{:.2f}%"})
-            )
-
-            st.dataframe(styled, use_container_width=True, hide_index=True)
+    # CDE elements
+    if elements is not None and not elements.empty:
+        st.markdown("**Key data elements (CDE = 2× weighted)**")
+        el = elements[(elements["REPORT_FAMILY"] == fam) & (elements["LAYER"] == layer)]
+        el = el[["COLUMN_NAME", "IS_KEY", "IS_CDE", "CRITICALITY_MULTIPLIER", "PII_TAG", "BUSINESS_TERM"]].copy()
+        el.columns = ["Column", "Key", "CDE", "Multiplier", "PII tag", "Business term"]
+        st.dataframe(el, use_container_width=True, hide_index=True)
 
 
 # --------------------------------------------------------------------------
-# Page 3 -- Cortex DQ (live DMF measurements bridged to dimensions 3/4/5/6)
-#
-# Lives in this app because it's the *measurement engine* for four of the
-# ten trust dimensions. The comparison panel at the bottom shows the
-# DMF-derived score side-by-side with the current (synthetic) score so
-# governance can review before swapping the source-of-truth.
+# Page 3 -- Lineage DQ (INT -> DW -> PUBL)
 # --------------------------------------------------------------------------
-
-CORTEX_DQ_HOWTO = """
-This page reads live measurements from `VW_PNC_DMF_LATEST_MEASUREMENTS` and
-`VW_PNC_DMF_DIMENSION_SCORES`. Two interchangeable tracks populate them:
-
-**Track A -- native Snowflake Cortex DQ** (cleanest, but ACCOUNTADMIN must
-grant `EXECUTE DATA METRIC FUNCTION` + `SNOWFLAKE.DATA_METRIC_USER` to the
-working role).
-
-```
-ddl/20_cortex_dq_setup.sql               -- attach 9 + 6 native DMFs
-ddl/21_pnc_dmf_dataset_map.sql           -- physical->logical bridge
-ddl/22_vw_pnc_dmf_dimension_scores.sql   -- bridge views this page reads
-ddl/seed/22a_seed_pnc_dmf_dataset_map.sql
-```
-
-**Track B -- manual SQL fallback** (no ACCOUNTADMIN required; computes the
-same 15 metrics in plain SQL inside a stored procedure). Use this when
-your role can't get the native-DMF privileges granted.
-
-```
-ddl/25_manual_dmf_fallback.sql           -- SP + measurements table
-ddl/21_pnc_dmf_dataset_map.sql
-ddl/22_vw_pnc_dmf_dimension_scores.sql
-ddl/seed/22a_seed_pnc_dmf_dataset_map.sql
-```
-
-To refresh measurements at any time:
-`CALL ASATTAR_TRUST_SCORE_POC.DQ_POC.SP_COMPUTE_DQ_MEASUREMENTS();`
-"""
-
-
-def render_cortex_dq() -> None:
-    st.subheader("Cortex Data Quality (DMF-derived dimensions)")
-    st.caption(
-        "Live measurements from Snowflake Data Metric Functions (or the "
-        "manual SP fallback), bridged into Trust Score dimensions 3 (Active "
-        "Issues), 4 (Timeliness), 5 (Completeness of Key Properties), and "
-        "6 (Data Profiling). Sidebar Domain/Tier filters scope the "
-        "comparison panel at the bottom."
-    )
-
-    if not _running_in_snowflake():
-        st.info(
-            "Cortex DQ data is only available when this app runs inside "
-            "Streamlit in Snowflake (SiS). Locally the bridge views don't "
-            "exist, so this page is read-only documentation."
-        )
-        with st.expander("How to enable", expanded=True):
-            st.markdown(CORTEX_DQ_HOWTO)
+def render_lineage() -> None:
+    st.subheader("Lineage DQ — INT → DW → PUBL")
+    dmf = load_dmf_dimension_scores()
+    lineage = load_lineage()
+    if scores is None or dmf is None:
+        enablement_banner(["DTS_VW_DATASET_TRUST_SCORE_LATEST", "DTS_VW_DMF_DIMENSION_SCORES"])
         return
 
-    measurements = load_dmf_measurements()
-    scores       = load_dmf_dimension_scores()
+    fam = st.selectbox("Report family", sorted(scores["REPORT_FAMILY"].unique()))
+    fam_scores = scores[scores["REPORT_FAMILY"] == fam].copy()
+    fam_scores["LAYER"] = pd.Categorical(fam_scores["LAYER"], categories=LAYER_ORDER, ordered=True)
+    fam_scores = fam_scores.sort_values("LAYER")
 
-    if measurements is None or scores is None:
-        st.warning(
-            "The bridge views (`VW_PNC_DMF_LATEST_MEASUREMENTS`, "
-            "`VW_PNC_DMF_DIMENSION_SCORES`) aren't in this schema yet."
+    # Trust score across layers
+    st.markdown("**Trust score across layers**")
+    line = (
+        alt.Chart(fam_scores)
+        .mark_bar()
+        .encode(
+            x=alt.X("LAYER:N", sort=LAYER_ORDER, axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("TRUST_SCORE:Q", scale=alt.Scale(domain=[0, 100]), title="Trust score"),
+            color=alt.Color("LAYER:N", legend=None),
+            tooltip=["LAYER", alt.Tooltip("TRUST_SCORE:Q", format=".1f"), "TRUST_BAND"],
         )
-        with st.expander("How to enable", expanded=True):
-            st.markdown(CORTEX_DQ_HOWTO)
-        return
-
-    if measurements.empty:
-        st.warning(
-            "Bridge views exist but no measurements have landed yet. "
-            "Track A: the first scheduled DMF run may take up to 5 minutes; "
-            "trigger an instant reading via the inline scans in Section E "
-            "of `ddl/20_cortex_dq_setup.sql`. "
-            "Track B: run "
-            "`CALL ASATTAR_TRUST_SCORE_POC.DQ_POC.SP_COMPUTE_DQ_MEASUREMENTS();`"
-        )
-        return
-
-    # KPI strip ----------------------------------------------------------
-    total_checks = len(measurements)
-    failing      = int((measurements["STATUS"] == "FAIL").sum())
-    passing      = int((measurements["STATUS"] == "PASS").sum())
-    untested     = total_checks - failing - passing
-    last_seen    = measurements["MEASUREMENT_TIME"].max()
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Datasets wired", scores["DATASET_ID"].nunique())
-    c2.metric("DMF readings", total_checks)
-    c3.metric("Passing", passing)
-    c4.metric("Failing", failing, delta_color="inverse")
-    c5.metric(
-        "Last measurement",
-        pd.Timestamp(last_seen).strftime("%H:%M") if pd.notna(last_seen) else "-",
+        .properties(height=280)
     )
-    if untested:
-        st.caption(
-            f"{untested} reading(s) have no threshold defined yet -- add rows "
-            "to `PNC_DMF_THRESHOLDS` to score them."
-        )
+    st.altair_chart(line, use_container_width=True)
 
-    st.divider()
-
-    # Per-dataset derived dimension scores -------------------------------
-    st.markdown("**Derived dimension scores (live from DMFs)**")
-    score_cols = [
-        "DATASET_NAME",
-        "DOMAIN",
-        "DIM_ISSUES_SCORE",
-        "DIM_TIMELINESS_SCORE",
-        "DIM_COMPLETENESS_KEY_PROPS_SCORE",
-        "DIM_PROFILING_SCORE",
-        "DIM_ISSUES_OPEN_P1",
-        "DIM_TIMELINESS_HOURS_LATE",
-    ]
-    available = [c for c in score_cols if c in scores.columns]
-    display = scores[available].copy()
-    rename = {
-        "DATASET_NAME":                     "Dataset",
-        "DOMAIN":                           "Domain",
-        "DIM_ISSUES_SCORE":                 "Active Issues",
-        "DIM_TIMELINESS_SCORE":             "Timeliness",
-        "DIM_COMPLETENESS_KEY_PROPS_SCORE": "Completeness (keys)",
-        "DIM_PROFILING_SCORE":              "Profiling",
-        "DIM_ISSUES_OPEN_P1":               "Open P1",
-        "DIM_TIMELINESS_HOURS_LATE":        "Hours late",
-    }
-    display = display.rename(columns=rename)
-    progress_cols = ["Active Issues", "Timeliness", "Completeness (keys)", "Profiling"]
-    column_config = {
-        c: st.column_config.ProgressColumn(c, min_value=0, max_value=100, format="%.1f")
-        for c in progress_cols
-        if c in display.columns
-    }
-    column_config["Hours late"] = st.column_config.NumberColumn(
-        "Hours late", format="%.1f"
-    )
-    st.dataframe(
-        display, use_container_width=True, hide_index=True, column_config=column_config
-    )
-
-    st.divider()
-
-    # Raw measurements table ---------------------------------------------
-    st.markdown("**Latest DMF measurements (raw)**")
-    raw = measurements.copy()
-    raw["MEASUREMENT_TIME"] = pd.to_datetime(raw["MEASUREMENT_TIME"], errors="coerce")
-    show_cols = [
-        "DATASET_ID",
-        "METRIC_NAME",
-        "COLUMN_NAME",
-        "VALUE",
-        "THRESHOLD_OP",
-        "THRESHOLD_VALUE",
-        "STATUS",
-        "SEVERITY_ON_FAIL",
-        "MEASUREMENT_TIME",
-    ]
-    show_cols = [c for c in show_cols if c in raw.columns]
-    raw_display = raw[show_cols].sort_values(
-        ["DATASET_ID", "METRIC_NAME", "COLUMN_NAME"]
-    )
-
-    def _row_style(row: pd.Series) -> list[str]:
-        # Light pastels with dark text -- legible on either light or dark theme.
-        if row.get("STATUS") == "FAIL":
-            return ["background-color:#FDECEE; color:#8A1525; font-weight:600"] * len(row)
-        if row.get("STATUS") == "PASS":
-            return ["background-color:#EAF7EE; color:#0B6E3D; font-weight:600"] * len(row)
-        return [""] * len(row)
-
-    st.dataframe(
-        raw_display.style.apply(_row_style, axis=1),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    # Comparison with bespoke scores -------------------------------------
-    st.divider()
-    st.markdown("**DMF-derived vs current synthetic score (per wired dataset)**")
-    compare_rows = []
-    for _, srow in scores.iterrows():
-        ds_id   = srow["DATASET_ID"]
-        bespoke = dq_latest[dq_latest["DATASET_ID"] == ds_id]
-        if bespoke.empty:
-            continue
-        b = bespoke.iloc[0]
-        for label, dmf_col, syn_col in [
-            ("Active Issues",       "DIM_ISSUES_SCORE",                "DIM_ISSUES_SCORE"),
-            ("Timeliness",          "DIM_TIMELINESS_SCORE",            "DIM_TIMELINESS_SCORE"),
-            ("Completeness (keys)", "DIM_COMPLETENESS_KEY_PROPS_SCORE","DIM_COMPLETENESS_KEY_PROPS_SCORE"),
-            ("Profiling",           "DIM_PROFILING_SCORE",             "DIM_PROFILING_SCORE"),
-        ]:
-            dmf_val = srow.get(dmf_col)
-            syn_val = b.get(syn_col)
-            if pd.isna(dmf_val) or pd.isna(syn_val):
-                continue
-            compare_rows.append({
-                "Dataset":             srow.get("DATASET_NAME") or ds_id,
-                "Dimension":           label,
-                "DMF-derived":         float(dmf_val),
-                "Current (synthetic)": float(syn_val),
-                "Delta":               float(dmf_val) - float(syn_val),
-            })
-    if compare_rows:
-        cmp_df = pd.DataFrame(compare_rows)
-        st.dataframe(
-            cmp_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "DMF-derived":         st.column_config.ProgressColumn("DMF-derived",         min_value=0, max_value=100, format="%.1f"),
-                "Current (synthetic)": st.column_config.ProgressColumn("Current (synthetic)", min_value=0, max_value=100, format="%.1f"),
-                "Delta":               st.column_config.NumberColumn("Delta", format="%+.1f"),
-            },
-        )
-        st.caption(
-            "Once governance signs off on the DMF-derived scores, swap them "
-            "into `PNC_DQ_RESULTS` via a nightly task and retire the bespoke "
-            "logic for these four dimensions."
-        )
+    # DQ + Observability sub-scores per layer (from DMFs)
+    st.markdown("**Measured DQ & Observability per layer (live DMFs)**")
+    d = dmf[dmf["REPORT_FAMILY"] == fam].copy()
+    if d.empty:
+        st.info("No DMF measurements for this family yet.")
     else:
-        st.caption(
-            "No overlap between wired DMF datasets and the synthetic "
-            "scorecard -- the comparison panel will populate once you map a "
-            "common DATASET_ID."
+        melt = d.melt(
+            id_vars=["LAYER"],
+            value_vars=["DQ_COMPLETENESS_SCORE", "DQ_UNIQUENESS_SCORE",
+                        "OBS_FRESHNESS_SCORE", "OBS_VOLUME_SCORE"],
+            var_name="Metric", value_name="Score",
         )
+        label = {
+            "DQ_COMPLETENESS_SCORE": "DQ · Completeness",
+            "DQ_UNIQUENESS_SCORE": "DQ · Uniqueness",
+            "OBS_FRESHNESS_SCORE": "Obs · Freshness",
+            "OBS_VOLUME_SCORE": "Obs · Volume",
+        }
+        melt["Metric"] = melt["Metric"].map(label)
+        chart = (
+            alt.Chart(melt)
+            .mark_rect()
+            .encode(
+                x=alt.X("LAYER:N", sort=LAYER_ORDER, axis=alt.Axis(orient="top", labelAngle=0)),
+                y=alt.Y("Metric:N", title=None),
+                color=alt.Color("Score:Q", scale=SCORE_COLOR_SCALE),
+                tooltip=["LAYER", "Metric", alt.Tooltip("Score:Q", format=".1f")],
+            )
+            .properties(height=200)
+        )
+        txt = (
+            alt.Chart(melt).mark_text(fontWeight="bold")
+            .encode(x=alt.X("LAYER:N", sort=LAYER_ORDER), y="Metric:N",
+                    text=alt.Text("Score:Q", format=".0f"),
+                    color=alt.condition(alt.datum.Score >= 75, alt.value("#111827"), alt.value("#F9FAFB")))
+        )
+        st.altair_chart(chart + txt, use_container_width=True)
+
+    # Lineage chain
+    if lineage is not None and not lineage.empty:
+        st.markdown("**Lineage chain**")
+        lc = lineage[lineage["REPORT_FAMILY"] == fam][
+            ["LAYER", "OBJECT_FQN", "UPSTREAM_FQN", "DOWNSTREAM_FQN", "TRANSFORM_TYPE"]
+        ].copy()
+        lc.columns = ["Layer", "Object", "Upstream", "Downstream", "Transform"]
+        st.dataframe(lc, use_container_width=True, hide_index=True)
 
 
 # --------------------------------------------------------------------------
-# Page 4 -- Methodology & Weights
+# Page 4 -- Methodology
 # --------------------------------------------------------------------------
-
 def render_methodology() -> None:
-    st.subheader("Methodology & Weights")
+    st.subheader("Methodology & weights")
+    weights = load_weights()
+    conf = load_confidence_factors()
+
     st.markdown(
-        "The Trust Score is a weighted average of 10 dimensions. Weights, "
-        "thresholds, and tier cut-points are stored in "
-        "`PNC_TRUST_SCORE_WEIGHTS` so Governance can change them without "
-        "code deploys."
+        "The trust score is a weighted average of 10 dimensions (weights sum to "
+        "100). Two dimensions — **Data Quality** and **Observability** — are "
+        "measured live via Snowflake DMFs on zero-copy clones and multiplied by "
+        "a per-layer **DQ confidence factor**. The rest are governance/registry "
+        "driven. Scores are capped by the **measurable ceiling** (sum of weights "
+        "we can measure today); an unseeded foundational dimension raises a gap flag."
     )
 
-    c1, c2 = st.columns([1, 1])
+    c1, c2 = st.columns(2)
     with c1:
-        st.markdown("**Weights (sum = 100)**")
-        st.dataframe(
-            weights[["DIMENSION_CODE", "DIMENSION_NAME", "WEIGHT_PCT"]],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "DIMENSION_CODE": "Code",
-                "DIMENSION_NAME": "Dimension",
-                "WEIGHT_PCT": st.column_config.NumberColumn("Weight %", format="%.0f"),
-            },
+        st.markdown("**Dimension weights (sum = 100)**")
+        wdf = weights if weights is not None else pd.DataFrame(
+            [(c, config.DIMENSION_LABEL[c], config.DIMENSION_WEIGHT[c]) for c, *_ in config.DIMENSIONS],
+            columns=["DIMENSION_CODE", "DIMENSION_LABEL", "WEIGHT"],
         )
         donut = (
-            alt.Chart(weights)
-            .mark_arc(innerRadius=70)
-            .encode(
-                theta=alt.Theta("WEIGHT_PCT:Q"),
-                color=alt.Color("DIMENSION_NAME:N", legend=alt.Legend(title="Dimension")),
-                tooltip=["DIMENSION_NAME", alt.Tooltip("WEIGHT_PCT:Q", format=".0f")],
-            )
+            alt.Chart(wdf).mark_arc(innerRadius=70)
+            .encode(theta="WEIGHT:Q",
+                    color=alt.Color("DIMENSION_LABEL:N", legend=alt.Legend(title="Dimension")),
+                    tooltip=["DIMENSION_LABEL", "WEIGHT"])
             .properties(height=320)
         )
         st.altair_chart(donut, use_container_width=True)
 
     with c2:
-        st.markdown("**Per-dimension status thresholds**")
-        st.markdown(
-            """
-            | Status | Score range |
-            |---|---|
-            | GREEN  | >= 80 |
-            | AMBER  | 60 - 79 |
-            | RED    | < 60 |
-
-            **Overall tier**
-
-            | Tier     | Score range |
-            |---|---|
-            | GOLD     | >= 85 |
-            | SILVER   | 70 - 84 |
-            | BRONZE   | 50 - 69 |
-            | AT_RISK  | < 50 |
-            """
+        st.markdown("**DQ confidence factor (by layer)**")
+        cdf = conf if conf is not None else pd.DataFrame(
+            [("BRONZE", "INT", 0.90), ("SILVER", "DW", 0.75), ("GOLD", "PUBL", 0.60)],
+            columns=["CONFIDENCE_TIER", "LAYER", "CONFIDENCE_FACTOR"],
         )
+        st.dataframe(cdf, use_container_width=True, hide_index=True)
         st.markdown(
-            """
-            **Reuse assessment summary** (from May 2026 doc)
+            f"""
+            **Trust bands**
 
-            - 6 of 10 dimensions sourceable from existing assets
-            - 4 dimensions require net-new registries (Ownership, Source classification, Usage, Feedback)
-            - **No existing pipeline tables need to be modified** for MVP -- see `ddl/99_existing_tables_changes.md`
-            - The closest existing surface candidate, `PNC_DQ_RESULTS`, is *extended* (not replaced)
+            | Band | Score |
+            |---|---|
+            | CERTIFIED | ≥ 90 |
+            | TRUSTED | 75–89 |
+            | ESTABLISHED | 60–74 |
+            | PROVISIONAL | 40–59 |
+            | AT RISK | < 40 |
+
+            **DAMA sub-dimensions of DQ:** {", ".join(config.DAMA_SUB_DIMS)}
+            (completeness + uniqueness are DMF-automated; accuracy/consistency/
+            validity seeded from IDQ). **CDE multiplier:** {config.CDE_MULTIPLIER:g}×.
+            **Measurable ceiling today:** {config.MEASURABLE_CEILING} points.
             """
         )
 
@@ -801,12 +361,11 @@ def render_methodology() -> None:
 # --------------------------------------------------------------------------
 # Router
 # --------------------------------------------------------------------------
-
 if page == "Portfolio Scorecard":
     render_portfolio()
 elif page == "Dataset Detail":
     render_detail()
-elif page == "Cortex DQ":
-    render_cortex_dq()
+elif page == "Lineage DQ":
+    render_lineage()
 else:
     render_methodology()

@@ -1,37 +1,69 @@
-# Data Trust Score — Streamlit Prototype
+# Data Trust Score v2 — DMF-measured, per-layer
 
-Prototype for the P&C **Data Trust Score** scorecard described in
-`02_Discovery_Reuse_Assessment_Data_Trust_Score.docx` (May 2026,
-EDAI Data Strategy & Governance — Phase 1 / Discovery / Artifact 2 of 3).
+A **data trust scorecard** for the P&C Workday reporting datasets, measured
+**per layer across the INT → DW → PUBL lineage** using live Snowflake **Data
+Metric Functions (DMFs)**.
 
-This is a **read-only visualization prototype** built on synthetic data so
-we can socialize the scorecard structure with Ella / Paul / Perri before
-the underlying tables are extended in Snowflake.
+v2 replaces the v1 synthetic prototype (`ASATTAR_TRUST_SCORE_POC.DQ_POC`, CSV
+fallback, dataset-grain). All objects are now `DTS_`-prefixed and hosted in
+`EDLE_DW_DB.PNC_DATA`, deployed under `PNC_DEVELOPER_RL`.
 
 ---
 
-## What this prototype demonstrates
+## What v2 adds over v1
 
-The doc's reuse decision is *Extend Existing — with targeted net-new additions*.
-Six of ten dimensions are sourceable from existing assets; four are
-governance/process gaps. This prototype shows what the **consumer-facing
-surface** would look like once the planned `PNC_DQ_RESULTS` is extended,
-plus the four net-new registries needed to fill the gaps.
+| v1 | v2 |
+|---|---|
+| Synthetic CSV data | Live DMFs on zero-copy clones of the real tables |
+| One score per dataset | Score per **(report family × layer)** — INT, DW, PUBL |
+| Flat 10-dim average | **DQ confidence factor** per layer (Bronze/Silver/Gold) |
+| — | **CDE 2× weighting** at element (column) grain |
+| — | **Measurable ceiling** + **foundational-gap flag** |
+| 4 tiers | 5 **trust bands** (Certified ≥ 90) |
 
-The 10 Trust Score dimensions:
+## The 10-dimension framework (weights sum to 100)
 
-| # | Dimension                       | Source in prototype                        |
-|---|---------------------------------|--------------------------------------------|
-| 1 | Data Ownership                  | net-new `PNC_DATA_OWNERSHIP_REGISTRY`      |
-| 2 | Data Source                     | net-new `PNC_SOURCE_CLASSIFICATION`        |
-| 3 | Active Issues                   | extend `PNC_DQ_RESULTS` (8-cat framework)  |
-| 4 | Timeliness                      | extend `PNC_DQ_RESULTS` (MAX(LOAD_DATE) vs SLA) |
-| 5 | Completeness of Key Properties  | extend `PNC_DQ_RESULTS` (TWID/POS_ID null %) |
-| 6 | Data Profiling                  | extend `PNC_DQ_RESULTS` (8-cat framework)  |
-| 7 | Data Definitions                | net-new (catalog flag column on registry)  |
-| 8 | Key Properties                  | net-new `PNC_KEY_PROPERTY_REGISTRY`        |
-| 9 | Usage                           | net-new `PNC_USAGE_TELEMETRY` (Phase 2)    |
-| 10| User Feedback                   | net-new `PNC_USER_FEEDBACK` (Phase 2)      |
+| Dimension | Weight | Source |
+|---|---:|---|
+| Data Quality (DAMA) | 22 | **DMF** (completeness, uniqueness) + seeded IDQ (accuracy, consistency, validity) |
+| Observability | 12 | **DMF** (freshness, volume) + incidents |
+| Ownership & Stewardship | 12 | registry *(foundational)* |
+| Classification | 12 | registry *(foundational)* |
+| Authoritative Source | 10 | registry *(foundational)* |
+| Lineage | 10 | registry (2 confirmed chains) |
+| Business Definitions | 9 | glossary coverage |
+| Active Issues | 5 | DMF fails + incidents |
+| Usage | 5 | usage metrics |
+| User Feedback | 3 | feedback ratings |
+
+- **DQ confidence factor** multiplies the measured DQ + Observability scores by
+  layer: **INT = Bronze 0.90, DW = Silver 0.75, PUBL = Gold 0.60**.
+- **CDE 2×**: completeness on Critical Data Element columns (identifier keys) is
+  double-weighted in the DQ rollup.
+- **Measurable ceiling** = sum of weights we can measure today (34: DQ 22 +
+  Observability 12) plus any seeded registry dims. A score can't exceed the
+  ceiling until the remaining dimensions are seeded.
+- **Foundational gap** flag fires when Ownership / Classification / Authoritative
+  Source is unseeded or zero.
+- **Trust bands**: Certified ≥ 90 · Trusted 75–89 · Established 60–74 ·
+  Provisional 40–59 · At Risk < 40 (tunable in `DTS_TRUST_BANDS`).
+
+## Scored objects (lineage)
+
+```
+POSITION_REPORT
+  INT  EDLE_INT_DB.PNC_WORKDAY01.STG_POSITION_REPORT   (COPY)
+  DW   EDLE_DW_DB.PNC_DATA.DT_POSITION_REPORT          (INSERT)
+  PUBL EDLE_PUBL_DB.PNC_ANALYTICS.STG_POSITION_REPORT_VW (VIEW)
+  key: (POSITION_ID, REPORT_EFFECTIVE_DATE, REPORT_ENTRY_DATE)
+
+TRENDED_REPORT   (INT skipped — TRUNCATE+COPY, empty at rest; DW is source-of-record)
+  DW   EDLE_DW_DB.PNC_DATA.DT_TRENDED_REPORT           (MERGE)
+  PUBL EDLE_PUBL_DB.PNC_ANALYTICS.STG_TRENDED_REPORT_VW (VIEW)
+  key: (BUSINESS_PROCESS_WID, EFFECTIVEDATE, EMPLOYEEID, RECORDTYPE)
+```
+
+Freshness anchor for both: `LOADDATE`.
 
 ---
 
@@ -39,450 +71,103 @@ The 10 Trust Score dimensions:
 
 ```
 data-trust-score-prototype/
-├── ddl/
-│   ├── 00_setup.sql                       # USE ROLE / WH / DB / SCHEMA
-│   ├── dba/
-│   │   └── role_split_for_dba.sql         # post-deploy cleanup; needs DBA
-│   ├── 01_pnc_dq_results_extended.sql     # extended scorecard fact + weights
-│   ├── 02_pnc_dq_dimension_results.sql    # narrow companion fact (trends)
-│   ├── 03_pnc_data_ownership_registry.sql
-│   ├── 04_pnc_source_classification.sql
-│   ├── 05_pnc_key_property_registry.sql
-│   ├── 06_pnc_usage_telemetry.sql         # Phase 2
-│   ├── 07_pnc_user_feedback.sql           # Phase 2
-│   ├── 10_vw_pnc_data_trust_score.sql     # consumer-facing view
-│   ├── 91_seed_data.sql                   # checklist for the seed/ files
-│   ├── 91_seed_via_stage.sql              # alt: PUT + COPY INTO
-│   ├── seed/                              # paste-into-worksheet INSERTs
-│   │   ├── 91a_seed_pnc_trust_score_weights.sql
-│   │   ├── 91b_seed_pnc_source_classification.sql
-│   │   ├── 91c_seed_pnc_data_ownership_registry.sql
-│   │   ├── 91d_seed_pnc_key_property_registry.sql
-│   │   ├── 91e_seed_pnc_dq_results.sql
-│   │   └── 91f_seed_pnc_dq_dimension_results.sql
-│   └── 99_existing_tables_changes.md      # what (if anything) to ALTER
-├── synthetic/
-│   ├── generate_synthetic.py              # writes CSVs to ./data/
-│   └── generate_snowflake_seed.py         # writes seed SQL to ./ddl/seed/
 ├── app/
-│   ├── shared.py                          # constants, loaders, CSS
-│   ├── trust_score_app.py                 # App 1 -- governance surface
-│   ├── ai_use_cases_app.py                # App 2 -- AI use cases / operational
-│   ├── streamlit_app.py                   # legacy redirect (kept for old links)
+│   ├── config.py             # single source of truth (namespace, dims, weights, bands, confidence, scored objects)
+│   ├── shared.py             # Snowflake-first DTS_ loaders + UI helpers
+│   ├── trust_score_app.py    # Portfolio, Dataset Detail, Lineage DQ, Methodology
+│   ├── ai_use_cases_app.py   # (orthogonal) Workforce/TA analytics
 │   └── .streamlit/config.toml
-├── requirements.txt
+├── ddl/
+│   ├── 00_setup.sql              # session pin -> PNC_DEVELOPER_RL / EDLE_DW_DB.PNC_DATA
+│   ├── 01_dts_registries.sql     # 7 registry tables (dataset, element+CDE, glossary, ownership, source, lineage, classification)
+│   ├── 02_dts_config.sql         # weights (=100), 5 bands, confidence factors
+│   ├── 03_dts_measured.sql       # DQ rule results, incidents, usage, feedback
+│   ├── 04_dts_scores.sql         # element-dim + dataset trust-score output tables
+│   ├── 20_dts_clone_and_dmf.sql  # SP_DTS_CLONE_SCORED_OBJECTS + SP_DTS_ATTACH_BASELINE_DMFS (Track A)
+│   ├── 21_dts_key_dmfs.sql       # SP_DTS_ATTACH_KEY_DMFS (NULL_COUNT + DUPLICATE_COUNT, Track A)
+│   ├── 25_dts_dmf_measurements.sql # DTS_DMF_MEASUREMENTS store + Track A/B populators
+│   ├── 26_dts_bridge_views.sql   # DMF output -> 0-100 DQ/Observability sub-scores (after 25)
+│   ├── 30_dts_scoring_engine.sql # SP_DTS_COMPUTE_SCORES (+ latest view)
+│   ├── 40_dts_seed_metadata.sql  # seed 5 objects, elements, lineage, foundational dims
+│   └── 50_create_streamlit_apps.sql
+├── docs/
 └── README.md
 ```
 
-The codebase is split into **two focused Streamlit apps** so each audience
-sees only what they need:
-
-| App | Audience | Pages |
-|---|---|---|
-| **Data Trust Score** (`app/trust_score_app.py`) | Governance, leadership, data-quality on-call | Portfolio Scorecard, Dataset Detail, Cortex DQ, Methodology & Weights |
-| **HR Analytics (AI use cases)** (`app/ai_use_cases_app.py`) | Workforce ops, TA | Workforce Shifts, TA Analytics |
-
-Cortex DQ lives in the Trust Score app because it's the *measurement
-engine* for trust dimensions 3 (Active Issues), 4 (Timeliness), 5
-(Completeness of Key Properties), and 6 (Data Profiling) -- not a
-standalone AI use case.
-
-Both apps share `shared.py` so loaders, constants, and CSS stay in sync.
-
 ---
 
-## Running locally (Streamlit prototypes)
-
-```bash
-cd data-trust-score-prototype
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-
-# 1. generate synthetic snapshot + 90-day history (only needed for Trust Score app)
-python synthetic/generate_synthetic.py
-
-# 2a. launch the Trust Score app (Portfolio + Detail + Cortex DQ + Methodology)
-streamlit run app/trust_score_app.py
-
-# 2b. launch the HR Analytics app (Workforce Shifts + TA Analytics)
-#     -- requires Snowflake; locally each page renders an enablement message
-streamlit run app/ai_use_cases_app.py
-```
-
-### Deploying both apps to Streamlit in Snowflake (SiS)
-
-> **Why two apps need explicit setup**: a SiS app is a Snowflake object
-> identified by `(database, schema, name)`. If you deploy both apps with
-> the same name (or use Snowsight's "create app" UI without changing the
-> name on the second one), the second deploy **replaces** the first --
-> even if the entry-point file is different. The fix is to create two
-> explicitly-named `STREAMLIT` objects.
-
-**Recommended path: `ddl/50_create_streamlit_apps.sql`** — one SQL file
-that creates a shared stage, defines both `STREAMLIT` objects with
-distinct names and `MAIN_FILE` settings, and verifies both show up.
-Run order summary:
-
-1. Run **Section A** to create `STREAMLIT_APP_STAGE`.
-2. Upload these files to the stage (Snowsight stage browser, drag-and-drop):
-   - `shared.py`
-   - `trust_score_app.py`
-   - `ai_use_cases_app.py`
-   - `.streamlit/config.toml` (keep the subfolder)
-3. Run **Section C** — creates the two named objects:
-
-   | Streamlit object | Entry point | What it shows |
-   |---|---|---|
-   | `PNC_DATA_TRUST_SCORE` | `trust_score_app.py` | Portfolio Scorecard, Dataset Detail, Cortex DQ, Methodology |
-   | `PNC_HR_AI_USE_CASES`  | `ai_use_cases_app.py` | Workforce Shifts, TA Analytics |
-
-4. Run **Section E** to verify both rows appear in `SHOW STREAMLITS`.
-5. Open them from Snowsight: **Projects > Streamlit** — both apps appear
-   side by side with the titles set in Section C.
-
-**Snowsight-UI-only alternative**: in **Projects > Streamlit > + Streamlit
-App**, create two apps with **distinct names** (e.g.
-`PNC_DATA_TRUST_SCORE` and `PNC_HR_AI_USE_CASES`), and for each one upload
-the same three Python files + `.streamlit/config.toml`. After creation,
-edit each app's properties to set the correct `MAIN_FILE`. The SQL DDL
-above is faster and reproducible -- prefer it.
-
-**Privileges**: both apps need `SELECT` on `ASATTAR_TRUST_SCORE_POC.DQ_POC`
-and `USAGE` on the `STREAMLIT` object (see Section D of the script).
-The Trust Score app additionally benefits from `SNOWFLAKE.CORTEX_USER`
-(powers the Cortex DQ page's measurement engine and any future AI
-narrative features).
-
----
-
-## Deploying to Snowflake (ASATTAR_TRUST_SCORE_POC.DQ_POC)
-
-All DDLs target `ASATTAR_TRUST_SCORE_POC.DQ_POC` and use `CREATE OR REPLACE`,
-so the deploy is safe to re-run.
-
-### Role
-
-The database is owned by `DATA_CLEAN_ROOM_ROLE`, so today the deploy runs
-under that role. `00_setup.sql` pins it for you -- just edit the
-warehouse name on line 14 if `COMPUTE_WH` is not what your account uses.
-
-Eventually we want the POC isolated from the clean-room work, so a DBA
-should run `ddl/dba/role_split_for_dba.sql` once they have a window. That
-script creates a dedicated `TRUST_SCORE_POC_ROLE`, transfers ownership of
-the database / schema / tables / views to it, and `COPY CURRENT GRANTS`
-preserves any read access already granted to other roles. **Not required
-for the POC to function** -- pure cleanup.
-
-### Path A -- worksheet only (simplest)
-
-In a Snowflake worksheet, run the following files in order. Each file is
-self-contained -- just paste and execute.
+## Deploy run order (worksheet, role `PNC_DEVELOPER_RL`)
 
 ```
-ddl/00_setup.sql
-ddl/01_pnc_dq_results_extended.sql
-ddl/02_pnc_dq_dimension_results.sql
-ddl/03_pnc_data_ownership_registry.sql
-ddl/04_pnc_source_classification.sql
-ddl/05_pnc_key_property_registry.sql
-ddl/06_pnc_usage_telemetry.sql
-ddl/07_pnc_user_feedback.sql
-ddl/10_vw_pnc_data_trust_score.sql
+1.  ddl/00_setup.sql
+2.  ddl/01_dts_registries.sql
+3.  ddl/02_dts_config.sql
+4.  ddl/03_dts_measured.sql
+5.  ddl/04_dts_scores.sql
+6.  ddl/20_dts_clone_and_dmf.sql        -- defines clone SP (+ native-DMF attach SP, Track A only)
+7.  ddl/21_dts_key_dmfs.sql             -- defines native key-DMF attach SP (Track A only)
+8.  ddl/25_dts_dmf_measurements.sql     -- unified store + Track A/B populators  (MUST precede 26)
+9.  ddl/26_dts_bridge_views.sql         -- bridge reads DTS_DMF_MEASUREMENTS  (after 25)
+10. ddl/30_dts_scoring_engine.sql
+11. ddl/40_dts_seed_metadata.sql        -- seeds the registry (must precede the CALLs below)
 
-ddl/seed/91a_seed_pnc_trust_score_weights.sql
-ddl/seed/91b_seed_pnc_source_classification.sql
-ddl/seed/91c_seed_pnc_data_ownership_registry.sql
-ddl/seed/91d_seed_pnc_key_property_registry.sql
-ddl/seed/91e_seed_pnc_dq_results.sql
-ddl/seed/91f_seed_pnc_dq_dimension_results.sql
+-- clone the scored objects (both tracks need the clones):
+CALL SP_DTS_CLONE_SCORED_OBJECTS();     -- fills CLONE_FQN + CLONE_EXISTS
 ```
 
-Then run a sanity query:
+### DMF measurement — pick a track
+
+**Track B — manual SQL (default; NO account grant needed):**
+```sql
+CALL SP_DTS_COMPUTE_DQ_MEASUREMENTS();  -- computes metrics over the clones
+CALL SP_DTS_COMPUTE_SCORES();
+SELECT * FROM DTS_VW_DATASET_TRUST_SCORE_LATEST ORDER BY TRUST_SCORE DESC;
+```
+
+**Track A — native DMFs (once the grants below exist):**
+```sql
+CALL SP_DTS_ATTACH_BASELINE_DMFS();     -- ROW_COUNT + FRESHNESS on clones
+CALL SP_DTS_ATTACH_KEY_DMFS();          -- NULL_COUNT + DUPLICATE_COUNT on keys
+-- wait for the first scheduled DMF run, then:
+CALL SP_DTS_SYNC_NATIVE_DMF_RESULTS();  -- copy SNOWFLAKE.LOCAL -> DTS_DMF_MEASUREMENTS
+CALL SP_DTS_COMPUTE_SCORES();
+```
+
+Both tracks write the same `DTS_DMF_MEASUREMENTS` table, so the bridge view,
+scoring engine, and app are identical. Switch tracks by choosing which
+populator SP you schedule.
+
+### Native-DMF grants (ACCOUNTADMIN — only needed for Track A)
+
+`PNC_DEVELOPER_RL` does **not** have these by default (verified 2026-07):
 
 ```sql
-SELECT * FROM ASATTAR_TRUST_SCORE_POC.DQ_POC.VW_PNC_DATA_TRUST_SCORE
-ORDER BY TRUST_SCORE_OVERALL DESC;
+GRANT EXECUTE DATA METRIC FUNCTION ON ACCOUNT  TO ROLE PNC_DEVELOPER_RL;
+GRANT DATABASE ROLE SNOWFLAKE.DATA_METRIC_USER TO ROLE PNC_DEVELOPER_RL;
 ```
 
-You should see 7 rows (one per dataset), with the Workday Position/Trended
-Reports landing in **Silver** and the Workplace Transition / FPA Beeline
-datasets in **Bronze** -- consistent with the May 2026 assessment findings.
+Until then, **use Track B** — it produces the same scorecard with only the
+`PNC_DATA_RWC` privileges the role already holds.
 
-### Path B -- SnowSQL with PUT + COPY INTO (faster for re-loads)
+### Streamlit apps
 
-Use `ddl/91_seed_via_stage.sql` instead of the `seed/` files. It creates a
-file format + named stage, then COPY INTOs each table from CSVs you upload
-with `PUT`. The PUT commands are commented at the bottom of that file.
-
-### Re-generating the seed scripts
-
-If you tweak `synthetic/generate_synthetic.py` (e.g. add a dataset or change
-quality knobs), regenerate the seed SQL with:
-
-```bash
-python synthetic/generate_synthetic.py        # rewrites ./data/*.csv
-python synthetic/generate_snowflake_seed.py   # rewrites ./ddl/seed/91*.sql
-```
+See `ddl/50_create_streamlit_apps.sql` — creates a stage, uploads
+`config.py + shared.py + trust_score_app.py + ai_use_cases_app.py +
+.streamlit/config.toml`, and defines two named `STREAMLIT` objects.
 
 ---
 
-## Key design decisions (reflecting the doc)
+## Design decisions
 
-1. **`PNC_DQ_RESULTS` is the surface.** Per the doc (slide 10 / planned),
-   the existing scorecard view is the closest candidate. We *extend* it
-   from 3 dimensions to 10, rather than building a parallel table.
-2. **One row per dataset per score-run-date.** Wide table for the
-   scorecard surface, plus a narrow companion (`PNC_DQ_DIMENSION_RESULTS`)
-   for trend charts and dimension-level audit.
-3. **Existing pipeline tables are NOT modified.** All new signals are
-   computed in views or net-new registries. See `ddl/99_existing_tables_changes.md`.
-4. **Weights are explicit and tunable.** Defaults reflect the doc's
-   guidance ("User Feedback can be deferred — lowest weight"). Stored in
-   a small config table so governance can change them without code.
-5. **Status thresholds are explicit.** Green ≥ 80, Amber 60–79, Red < 60
-   per dimension. Overall tier: Gold ≥ 85, Silver 70–84, Bronze 50–69, At-Risk < 50.
-<<<<<<< Updated upstream
-=======
-
----
-
-## Appendix A — Cortex Data Quality (MVP measurement layer)
-
-In May 2026 Snowflake shipped a Catalog UI for **Cortex Data Quality**: AI
-suggests Data Metric Functions (DMFs) for a table, you accept them, Snowflake
-schedules the runs, and results land in
-`SNOWFLAKE.LOCAL.DATA_QUALITY_MONITORING_RESULTS`. For the MVP we use Cortex
-DQ as the **measurement engine for the four trust-score dimensions it
-natively covers**, with the prototype's bridge views translating raw DMF
-output into per-dimension 0–100 scores:
-
-| Trust Score dimension | Sourced from |
-|---|---|
-| #3 Active Issues | count of FAILED DMFs by severity (P1/P2/P3) |
-| #4 Timeliness | `SNOWFLAKE.CORE.FRESHNESS(LOADDATE)` vs `SLA_HOURS` |
-| #5 Completeness of Key Properties | `SNOWFLAKE.CORE.NULL_PERCENT` on key columns |
-| #6 Data Profiling | % of all attached DMFs passing thresholds |
-
-The other six dimensions (Ownership, Source, Definitions, Key Properties,
-Usage, Feedback) remain registry-driven — Cortex DQ does not measure them.
-
-### MVP target tables
-
-The MVP instruments the two Workday tables that this product depends on,
-mirrored into the POC schema from the production EDL DDL:
-
-| | |
-|---|---|
-| Position FQN (POC) | `ASATTAR_TRUST_SCORE_POC.DQ_POC.DT_POSITION_REPORT` |
-| Trended FQN (POC)  | `ASATTAR_TRUST_SCORE_POC.DQ_POC.DT_TRENDED_REPORT` |
-| Production EDL FQNs | `EDLE_DW_DB.PNC_DATA.DT_POSITION_REPORT` / `…DT_TRENDED_REPORT` |
-| Working role | `DATA_CLEAN_ROOM_ROLE` (owns `ASATTAR_TRUST_SCORE_POC.DQ_POC`) |
-| DMFs attached | 9 on Position, 6 on Trended (15 total) |
-| Schedule | `USING CRON 0 7 * * * UTC` (~02:00 ET, post-overnight loads) |
-
-The POC mirrors the EDL table shape exactly (same columns and types) but
-strips the `WITH TAG (ADMIN_DB.ADMIN_SCH.WPII_*)` clauses from the
-production DDL — `ADMIN_DB` requires admin-level access this account
-doesn't have. Stripping them only disables the optional tag-based DMF demo
-in Section F of file 20; everything else works the same. Apply the tags
-later if/when the role gets USAGE on `ADMIN_DB.ADMIN_SCH`.
-
-`DT_POSITION_REPORT` is registered as `DS_POSITION_REPORT` (weekly load,
-SLA = 168h); `DT_TRENDED_REPORT` is `DS_TRENDED_REPORT` (monthly load,
-SLA = 840h). Both have a real `LOADDATE TIMESTAMP_NTZ` column, so
-`FRESHNESS(LOADDATE)` is a true freshness signal — no proxy column needed.
-
-### Files
-
-```
-ddl/DT_POSITION_REPORT.sql               -- real table DDL (deploy first)
-ddl/DT_TRENDED_REPORT.sql                -- real table DDL (deploy first)
-ddl/ALTER_DT_TRENDED_REPORT.sql          -- additive columns for trended
-ddl/30_copy_into_dt_tables.sql           -- file format + COPY INTO from internal stage
-ddl/20_cortex_dq_setup.sql               -- TRACK A: attach 9 + 6 native DMFs
-ddl/25_manual_dmf_fallback.sql           -- TRACK B: SP + manual measurements table
-ddl/21_pnc_dmf_dataset_map.sql           -- physical->logical map + threshold config
-ddl/22_vw_pnc_dmf_dimension_scores.sql   -- bridge views the Streamlit page reads
-ddl/seed/22a_seed_pnc_dmf_dataset_map.sql
-ddl/40_workforce_analytics_views.sql     -- applied analytics on top (Appendix B)
-```
-
-### One-time prerequisites (DBA / ACCOUNTADMIN)
-
-The setup script has these commented at the top of `ddl/20_*.sql`:
-
-```sql
-USE ROLE ACCOUNTADMIN;
-
-GRANT EXECUTE DATA METRIC FUNCTION ON ACCOUNT  TO ROLE DATA_CLEAN_ROOM_ROLE;
-GRANT DATABASE ROLE SNOWFLAKE.DATA_METRIC_USER TO ROLE DATA_CLEAN_ROOM_ROLE;
-GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER      TO ROLE DATA_CLEAN_ROOM_ROLE;  -- optional
-```
-
-The optional `CORTEX_USER` and `CORTEX_MODELS_ALLOWLIST` (`mistral-7b`,
-`llama3.1-8b`) are only needed for the Snowsight AI-suggestion UX. The
-manual SQL DMF path the prototype uses works without them.
-
-### MVP run order
-
-There are two interchangeable paths for step 8 — pick one based on whether
-the working role can be granted the account-level privileges that native
-Cortex DQ requires. Everything before and after step 8 is identical.
-
-```
- 1. ddl/00_setup.sql                         -- session pin
- 2. ddl/01..10..91*.sql                      -- prototype scaffolding (existing)
- 3. ddl/DT_POSITION_REPORT.sql               -- create the POC mirror tables
- 4. ddl/DT_TRENDED_REPORT.sql
- 5. ddl/ALTER_DT_TRENDED_REPORT.sql
- 6. <upload CSVs to @ASATTAR_TRUST_SCORE_POC.DQ_POC.STG_TRUST_SCORE_SEED/  via PUT or Snowsight UI>
- 7. ddl/30_copy_into_dt_tables.sql           -- file format + COPY INTO
- 8a. ddl/20_cortex_dq_setup.sql              -- TRACK A: native Cortex DQ
-                                                (requires ACCOUNTADMIN to grant
-                                                 EXECUTE DATA METRIC FUNCTION +
-                                                 SNOWFLAKE.DATA_METRIC_USER)
- 8b. ddl/25_manual_dmf_fallback.sql          -- TRACK B: manual SQL fallback
-                                                (works with just schema OWNERSHIP
-                                                 and SELECT on the source tables)
- 9. ddl/21_pnc_dmf_dataset_map.sql
-10. ddl/22_vw_pnc_dmf_dimension_scores.sql
-11. ddl/seed/22a_seed_pnc_dmf_dataset_map.sql
-```
-
-**Track A (native Cortex DQ)** uses `SNOWFLAKE.CORE.*` data metric functions
-attached to the tables, scheduled by Snowflake itself, with results landing
-in `SNOWFLAKE.LOCAL.DATA_QUALITY_MONITORING_RESULTS`. Cleaner long-term but
-requires ACCOUNTADMIN to run the grants in Section A of file 20.
-
-**Track B (manual SQL fallback)** computes the same 15 metrics in plain SQL
-inside a stored procedure, writes them to `PNC_DQ_MEASUREMENTS_MANUAL`
-(same column shape as the native results view), and lets the bridge view
-in file 22 read from there instead. No ACCOUNTADMIN needed; the SP runs
-with the caller's privileges. To refresh the dashboard:
-`CALL ASATTAR_TRUST_SCORE_POC.DQ_POC.SP_COMPUTE_DQ_MEASUREMENTS();`. If the
-role also has `EXECUTE TASK`, Section D of file 25 provides an optional
-TASK definition to run it on a CRON schedule.
-
-The bridge view in file 22 is wired to the manual table by default. Comment
-at the top of file 22 documents the one-line swap to point it back at
-`SNOWFLAKE.LOCAL.DATA_QUALITY_MONITORING_RESULTS` if you switch to Track A
-later.
-
-File 30 uses `MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE` so CSV column order
-doesn't have to match the table — Snowflake matches by header name.
-Because that mode is incompatible with `VALIDATION_MODE`, the pre-flight
-uses `INFER_SCHEMA` plus a header-diff query that lists any CSV columns
-that wouldn't land anywhere (those would otherwise be silently dropped).
-The COPY itself runs with `ON_ERROR = CONTINUE` so a few bad rows don't
-abort the batch, and `TABLE(VALIDATE(..., JOB_ID => '_LAST'))` surfaces
-any line-level rejections after the load.
-
-Section B of file 20 spot-checks the schema and prints a quick null/dup
-profile so you can sanity-check the seed thresholds against the actual
-data.
-
-### Triggering the first measurement
-
-The first scheduled run lands at the next CRON tick (07:00 UTC). To get
-instant measurements during a demo, Section E of `ddl/20_*.sql` calls each
-DMF inline — those readings also land in
-`SNOWFLAKE.LOCAL.DATA_QUALITY_MONITORING_RESULTS` immediately.
-
-### Tag-based DMFs (optional — Section F of file 20)
-
-Both EDL tables are heavily PII-tagged with `ADMIN_DB.ADMIN_SCH.WPII_*`.
-`ALTER TAG … ADD DATA METRIC FUNCTION` attaches a DMF to **every column
-carrying the tag** in the account, including new columns added later.
-That means one statement can monitor every employee/manager identifier
-(`WPII_ALPHANUM_ID`) or PII date (`WPII_DATE`) without per-column
-ALTERs. Gated on the tag-management team granting `OWNERSHIP` or `APPLY`
-on the tag — covered in Section F as an optional advanced path.
-
-### Verifying in the dashboard
-
-In Streamlit (SiS), open the **Cortex DQ** page in the
-`trust_score_app.py` app. It shows:
-
-- KPI strip (datasets wired, total readings, passing/failing, last
-  measurement timestamp)
-- Per-dataset derived scores for dimensions 3, 4, 5, 6
-- Raw DMF measurements with PASS/FAIL highlighting
-- Side-by-side comparison of DMF-derived vs current synthetic scores so
-  governance can review before swapping the source-of-truth
-
-Locally, the page renders the enablement instructions instead of live data.
-
-### Fallback if the MVP role doesn't have OWNERSHIP
-
-`ALTER TABLE … ADD DATA METRIC FUNCTION` requires OWNERSHIP. If your role
-only has SELECT on `EDLE_DW_DB.PNC_DATA`, Section H of `ddl/20_*.sql`
-points to the prior proxy-view pattern (preserved in git history) — wrap
-the source in a view in a schema you own and attach DMFs to the view
-instead. Update the rows in `PNC_DMF_DATASET_MAP` to point at the view's
-FQN if you take this path.
-
----
-
-## Appendix B — Workforce analytics & TA analytics (applied AI use cases)
-
-On top of the Trust Score and Cortex DQ surfaces, the prototype ships two
-applied-analytics pages that answer specific client AI use cases using
-**only the real data already loaded** — no Cortex grant required.
-
-| Page | Use case answered | View(s) |
-|---|---|---|
-| **Workforce Shifts** | Anomaly detection (UC #1), workforce shift detection + reorg detection (UC #2) | `VW_WORKFORCE_ANOMALIES`, `VW_WORKFORCE_WEEKLY_METRICS`, `VW_REORG_EVENTS` |
-| **TA Analytics** | Time-to-fill distribution + recruiter workload (UC #3) | `VW_TIME_TO_FILL`, `VW_RECRUITER_WORKLOAD` |
-
-### Run order
-
-Add one step to the MVP run order from Appendix A:
-
-```
-12. ddl/40_workforce_analytics_views.sql   -- 5 applied-analytics views
-```
-
-The file requires no special privileges — only `SELECT` on
-`DT_TRENDED_REPORT` and `DT_POSITION_REPORT`, and `CREATE VIEW` in the
-working schema. It's independent of the Cortex DQ infrastructure (files
-20–25), so you can deploy it without running any of the DMF setup.
-
-### What each view does
-
-- **`VW_WORKFORCE_WEEKLY_METRICS`** — aggregates the trended report into
-  per-(week, L1) counts of headcount, hires, voluntary terms, involuntary
-  terms, and promotions, with a 4-week trailing baseline (mean + stddev).
-- **`VW_WORKFORCE_ANOMALIES`** — long-format z-score per (week, L1, metric).
-  Status is `ANOMALY` when |z| ≥ 2, `NOTABLE` when 1 ≤ |z| < 2.
-- **`VW_REORG_EVENTS`** — bulk L1/L2 movements between consecutive snapshots.
-  Default threshold is ≥ 5 employees moved in a single (week, from→to)
-  tuple.
-- **`VW_TIME_TO_FILL`** — per-position vacate→fill duration from the latest
-  `DT_POSITION_REPORT` snapshot.
-- **`VW_RECRUITER_WORKLOAD`** — open requisitions per recruiter, latest
-  snapshot. The Streamlit page flags any recruiter at or above 1.5× the
-  median open-req count as `OVERLOADED`.
-
-### What unlocks with full prod data + Cortex
-
-See [`docs/REAL_DATA_OPPORTUNITIES.md`](./docs/REAL_DATA_OPPORTUNITIES.md)
-for a detailed mapping of each client AI use case to:
-
-1. What works in the POC today
-2. What changes when pointed at production EDL tables
-3. What unlocks once `SNOWFLAKE.CORTEX_USER` is granted
-
-Includes a privilege-checklist for the Snowflake admin team and a
-phased roadmap.
-
----
-
-## Page-by-page user guides
-
-- [`docs/PORTFOLIO_AND_DETAIL_PAGES.md`](./docs/PORTFOLIO_AND_DETAIL_PAGES.md)
-  — panel-by-panel walkthrough of the **Portfolio Scorecard** and
-  **Dataset Detail** pages: what each component shows, how to read it,
-  underlying data sources, common workflows, and customisation points
-- [`docs/REAL_DATA_OPPORTUNITIES.md`](./docs/REAL_DATA_OPPORTUNITIES.md)
-  — what each page becomes with production-scale data and Cortex grants
->>>>>>> Stashed changes
+1. **No new schema.** `PNC_DEVELOPER_RL` can't `CREATE SCHEMA` on the shared
+   EDLE databases, so every object is `DTS_`-prefixed inside
+   `EDLE_DW_DB.PNC_DATA` (it holds `PNC_DATA_RWC`).
+2. **Clone-based DMFs.** Production tables are never altered. Each scored object
+   is cloned to `DTS_CLONE__<db>__<schema>__<obj>` (CTAS snapshot for PUBL
+   views, which can't be zero-copy cloned); DMFs attach to the clone.
+3. **`config.py` is the single source of truth.** Dimensions, weights, bands,
+   confidence factors, and the scored-object map live there; the DDL seeds
+   mirror it and the app imports it, so nothing drifts.
+4. **Snowflake-first app.** No synthetic CSVs — the score is computed live. The
+   app renders an enablement banner until the DTS_ objects exist and
+   `SP_DTS_COMPUTE_SCORES()` has run.
