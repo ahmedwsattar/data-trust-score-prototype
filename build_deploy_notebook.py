@@ -155,6 +155,12 @@ STEPS = [
      "## 9 · Scoring engine (`SP_DTS_COMPUTE_SCORES` + latest view)"),
     ("40_dts_seed_metadata.sql", "seed_metadata",
      "## 10 · Seed registries + metadata  _(run before the CALLs below)_"),
+    ("45_dts_jira_incidents.sql", "jira_incidents",
+     "## 10b · Jira -> Active Issues  (loader + sample)\n\n"
+     "Creates `SP_DTS_LOAD_JIRA_ISSUES` and loads a **sample** payload into "
+     "`DTS_OBSERVABILITY_INCIDENT` so the Active Issues dimension is exercised end-to-end. "
+     "Replace the sample `PARSE_JSON(...)` with the real EDA issues array once the Atlassian "
+     "MCP is authorized. This step also re-runs `SP_DTS_COMPUTE_SCORES()`."),
 ]
 
 cells = [md(
