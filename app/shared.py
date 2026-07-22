@@ -144,6 +144,12 @@ def load_confidence_factors() -> pd.DataFrame | None:
     return _read("DTS_DQ_CONFIDENCE_FACTOR")
 
 
+@st.cache_data(show_spinner=False, ttl=60)
+def load_incidents() -> pd.DataFrame | None:
+    """Open/closed incidents (incl. Jira-sourced) feeding the Active Issues dimension."""
+    return _read("DTS_OBSERVABILITY_INCIDENT", date_cols=["DETECTED_AT", "RESOLVED_AT"])
+
+
 # --------------------------------------------------------------------------
 # Workforce / TA analytics loaders (sister ai_use_cases_app.py).
 # Orthogonal to the trust score; the underlying VW_WORKFORCE_* views are not

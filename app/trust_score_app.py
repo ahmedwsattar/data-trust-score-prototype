@@ -33,6 +33,7 @@ from shared import (
     load_data_elements,
     load_dmf_dimension_scores,
     load_element_dimension_scores,
+    load_incidents,
     load_lineage,
     load_trust_scores,
     load_weights,
@@ -208,6 +209,30 @@ def render_detail() -> None:
         el = el[["COLUMN_NAME", "IS_KEY", "IS_CDE", "CRITICALITY_MULTIPLIER", "PII_TAG", "BUSINESS_TERM"]].copy()
         el.columns = ["Column", "Key", "CDE", "Multiplier", "PII tag", "Business term"]
         st.dataframe(el, use_container_width=True)
+
+    # Active issues (Jira) driving the Active Issues dimension for this object
+    incidents = load_incidents()
+    st.markdown("**Active issues (Jira) — open**")
+    if incidents is None or incidents.empty:
+        st.caption("No incidents recorded. Load them via `SP_DTS_LOAD_JIRA_ISSUES(...)`.")
+    else:
+        inc = incidents[
+            (incidents["REPORT_FAMILY"] == fam)
+            & (incidents["LAYER"] == layer)
+            & (incidents["STATUS"] == "OPEN")
+        ]
+        i1, i2, i3 = st.columns(3)
+        i1.metric("Open P1", int((inc["SEVERITY"] == "P1").sum()))
+        i2.metric("Open P2", int((inc["SEVERITY"] == "P2").sum()))
+        i3.metric("Open P3", int((inc["SEVERITY"] == "P3").sum()))
+        if inc.empty:
+            st.caption("No open issues for this object — Active Issues scores 100.")
+        else:
+            show = inc[["SEVERITY", "INCIDENT_TYPE", "DETAIL", "DETECTED_AT"]].copy()
+            show.columns = ["Severity", "Source", "Issue", "Detected"]
+            st.dataframe(show.sort_values("Severity"), use_container_width=True)
+            st.caption("Active Issues = 100 − 10·P1 − 3·P2 − 1·P3 (open incidents). "
+                       "Sourced from `DTS_OBSERVABILITY_INCIDENT` (INCIDENT_TYPE='JIRA').")
 
 
 # --------------------------------------------------------------------------
