@@ -8,6 +8,11 @@ page renders an enablement banner.
 
 All framework constants (dimensions, weights, bands, confidence factors) come
 from config.py so the app, the DDL, and the docs never drift.
+
+SiS runtime compatibility: this account's Streamlit-in-Snowflake runtime is < 1.23,
+so the apps must avoid `st.column_config`, `st.divider()`, and the
+`st.dataframe(hide_index=...)` parameter. Use `st.markdown("---")` for horizontal
+rules and plain `st.dataframe(df, use_container_width=True)` tables.
 """
 
 from __future__ import annotations

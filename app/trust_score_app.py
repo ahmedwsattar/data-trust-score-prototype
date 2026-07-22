@@ -92,11 +92,15 @@ def render_portfolio() -> None:
     c4.metric("At risk", int((scores["TRUST_BAND"] == "AT_RISK").sum()), delta_color="inverse")
     c5.metric("Foundational gaps", int(scores["FOUNDATIONAL_GAP_FLAG"].sum()), delta_color="inverse")
 
-    st.divider()
+    st.markdown("---")
 
-    # Heatmap: family x layer trust score
+    # Heatmap: family x layer trust score. Only feed Altair the columns it needs
+    # -- passing the full frame (incl. the FOUNDATIONAL_GAPS ARRAY column) makes
+    # Altair's dataframe sanitizer raise "bad argument type for built-in operation".
     st.markdown("**Trust score by report family x layer**")
-    heat_df = scores.copy()
+    heat_df = scores[["REPORT_FAMILY", "LAYER", "TRUST_SCORE", "TRUST_BAND", "MEASURABLE_CEILING"]].copy()
+    heat_df["TRUST_SCORE"] = pd.to_numeric(heat_df["TRUST_SCORE"], errors="coerce")
+    heat_df["MEASURABLE_CEILING"] = pd.to_numeric(heat_df["MEASURABLE_CEILING"], errors="coerce")
     heat_df["LAYER"] = pd.Categorical(heat_df["LAYER"], categories=LAYER_ORDER, ordered=True)
     heat = (
         alt.Chart(heat_df)
@@ -118,7 +122,7 @@ def render_portfolio() -> None:
     )
     st.altair_chart(heat + text, use_container_width=True)
 
-    st.divider()
+    st.markdown("---")
 
     # Ranking table
     st.markdown("**Scored objects**")
@@ -129,13 +133,7 @@ def render_portfolio() -> None:
     tbl = tbl.sort_values("TRUST_SCORE", ascending=False).reset_index(drop=True)
     tbl.columns = ["Family", "Layer", "Confidence tier", "Score", "Band",
                    "Ceiling", "Gap?", "Missing foundational"]
-    st.dataframe(
-        tbl, use_container_width=True, hide_index=True,
-        column_config={
-            "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%.1f"),
-            "Ceiling": st.column_config.NumberColumn("Ceiling", format="%.0f"),
-        },
-    )
+    st.dataframe(tbl, use_container_width=True)
     st.caption(
         "**Ceiling** = sum of dimension weights measurable today (DMF-backed + "
         "seeded). Scores can't exceed the ceiling until the remaining dimensions "
@@ -184,29 +182,22 @@ def render_detail() -> None:
         )
         st.caption(f"Measurable ceiling: {row['MEASURABLE_CEILING']:.0f}")
 
-    st.divider()
+    st.markdown("---")
 
     # Dimension breakdown for this object
     st.markdown("**Dimension breakdown**")
     w = weights.rename(columns={"DIMENSION_CODE": "DIMENSION_CODE"})
     d = eds[(eds["REPORT_FAMILY"] == fam) & (eds["LAYER"] == layer)].copy()
     d = d.merge(w[["DIMENSION_CODE", "DIMENSION_LABEL", "WEIGHT"]], on="DIMENSION_CODE", how="right")
+    for _c in ("RAW_SCORE", "CONFIDENCE_FACTOR", "WEIGHT"):
+        d[_c] = pd.to_numeric(d[_c], errors="coerce")
     d["EFFECTIVE"] = (d["RAW_SCORE"].fillna(0) * d["CONFIDENCE_FACTOR"].fillna(1.0))
     d["CONTRIBUTION"] = d["WEIGHT"] * d["EFFECTIVE"] / 100.0
     out = d[["DIMENSION_LABEL", "WEIGHT", "RAW_SCORE", "CONFIDENCE_FACTOR",
              "EFFECTIVE", "CONTRIBUTION", "IS_MEASURABLE"]].copy()
     out.columns = ["Dimension", "Weight", "Raw", "Confidence", "Effective", "Points", "Measurable"]
     out = out.sort_values("Weight", ascending=False)
-    st.dataframe(
-        out, use_container_width=True, hide_index=True,
-        column_config={
-            "Weight": st.column_config.NumberColumn("Weight", format="%.0f"),
-            "Raw": st.column_config.ProgressColumn("Raw", min_value=0, max_value=100, format="%.0f"),
-            "Confidence": st.column_config.NumberColumn("Conf.", format="%.2f"),
-            "Effective": st.column_config.NumberColumn("Effective", format="%.0f"),
-            "Points": st.column_config.NumberColumn("Points", format="%.1f"),
-        },
-    )
+    st.dataframe(out, use_container_width=True)
     st.caption("Points = Weight × (Raw × Confidence) / 100. DQ and Observability "
                "carry the per-layer confidence factor; other dimensions use 1.0.")
 
@@ -216,7 +207,7 @@ def render_detail() -> None:
         el = elements[(elements["REPORT_FAMILY"] == fam) & (elements["LAYER"] == layer)]
         el = el[["COLUMN_NAME", "IS_KEY", "IS_CDE", "CRITICALITY_MULTIPLIER", "PII_TAG", "BUSINESS_TERM"]].copy()
         el.columns = ["Column", "Key", "CDE", "Multiplier", "PII tag", "Business term"]
-        st.dataframe(el, use_container_width=True, hide_index=True)
+        st.dataframe(el, use_container_width=True)
 
 
 # --------------------------------------------------------------------------
@@ -231,7 +222,8 @@ def render_lineage() -> None:
         return
 
     fam = st.selectbox("Report family", sorted(scores["REPORT_FAMILY"].unique()))
-    fam_scores = scores[scores["REPORT_FAMILY"] == fam].copy()
+    fam_scores = scores[scores["REPORT_FAMILY"] == fam][["LAYER", "TRUST_SCORE", "TRUST_BAND"]].copy()
+    fam_scores["TRUST_SCORE"] = pd.to_numeric(fam_scores["TRUST_SCORE"], errors="coerce")
     fam_scores["LAYER"] = pd.Categorical(fam_scores["LAYER"], categories=LAYER_ORDER, ordered=True)
     fam_scores = fam_scores.sort_values("LAYER")
 
@@ -295,7 +287,7 @@ def render_lineage() -> None:
             ["LAYER", "OBJECT_FQN", "UPSTREAM_FQN", "DOWNSTREAM_FQN", "TRANSFORM_TYPE"]
         ].copy()
         lc.columns = ["Layer", "Object", "Upstream", "Downstream", "Transform"]
-        st.dataframe(lc, use_container_width=True, hide_index=True)
+        st.dataframe(lc, use_container_width=True)
 
 
 # --------------------------------------------------------------------------
@@ -337,7 +329,7 @@ def render_methodology() -> None:
             [("BRONZE", "INT", 0.90), ("SILVER", "DW", 0.75), ("GOLD", "PUBL", 0.60)],
             columns=["CONFIDENCE_TIER", "LAYER", "CONFIDENCE_FACTOR"],
         )
-        st.dataframe(cdf, use_container_width=True, hide_index=True)
+        st.dataframe(cdf, use_container_width=True)
         st.markdown(
             f"""
             **Trust bands**
@@ -362,10 +354,16 @@ def render_methodology() -> None:
 # Router
 # --------------------------------------------------------------------------
 if page == "Portfolio Scorecard":
-    render_portfolio()
+    _render = render_portfolio
 elif page == "Dataset Detail":
-    render_detail()
+    _render = render_detail
 elif page == "Lineage DQ":
-    render_lineage()
+    _render = render_lineage
 else:
-    render_methodology()
+    _render = render_methodology
+
+try:
+    _render()
+except Exception as e:  # surface the failing line in-app instead of a bare TypeError
+    st.error("Unexpected error while rendering this page.")
+    st.exception(e)

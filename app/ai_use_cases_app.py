@@ -74,11 +74,11 @@ with st.sidebar:
         ],
         label_visibility="collapsed",
     )
-    st.divider()
+    st.markdown("---")
     st.caption(
         f"Source: {'Snowflake' if _running_in_snowflake() else 'local CSV'}"
     )
-    st.divider()
+    st.markdown("---")
     st.caption(
         "Trust Score scorecard + Cortex DQ measurements live in the "
         "**Data Trust Score** app."
@@ -150,7 +150,7 @@ def render_workforce_shifts() -> None:
     c4.metric("L1 orgs tracked", n_l1)
     c5.metric("Reorg events detected", n_reorgs)
 
-    st.divider()
+    st.markdown("---")
 
     # Anomaly trend ------------------------------------------------------
     st.markdown("**Weekly trend with anomaly overlay**")
@@ -245,7 +245,7 @@ def render_workforce_shifts() -> None:
             use_container_width=True,
         )
 
-    st.divider()
+    st.markdown("---")
 
     # Anomaly table ------------------------------------------------------
     st.markdown("**Top anomalies (ranked by absolute z-score)**")
@@ -287,10 +287,9 @@ def render_workforce_shifts() -> None:
                 {"Actual": "{:.0f}", "Baseline": "{:.1f}", "Z-score": "{:+.2f}"}
             ),
             use_container_width=True,
-            hide_index=True,
         )
 
-    st.divider()
+    st.markdown("---")
 
     # Reorg detector panel -----------------------------------------------
     st.markdown("**Reorg detector -- bulk L1/L2 movements between snapshots**")
@@ -331,15 +330,6 @@ def render_workforce_shifts() -> None:
         st.dataframe(
             rd[["Snapshot date", "Level", "From", "To", "Employees moved"]],
             use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Employees moved": st.column_config.ProgressColumn(
-                    "Employees moved",
-                    min_value=0,
-                    max_value=max_moved,
-                    format="%d",
-                )
-            },
         )
 
 
@@ -381,7 +371,7 @@ def _ta_diagnostic_panel() -> None:
               , COUNT(OPEN_JOB_REQUISITION_ID)                                      AS has_open_req_id
             FROM latest
         """).to_pandas()
-        st.dataframe(diag, use_container_width=True, hide_index=True)
+        st.dataframe(diag, use_container_width=True)
         st.caption(
             "If `has_vacate_date`, `has_last_fill_date`, `has_recruiter`, or "
             "`has_open_req_id` is near zero, that field is sparsely populated "
@@ -450,7 +440,7 @@ def render_ta_analytics() -> None:
         active_workload if active_workload else positions_touched,
     )
 
-    st.divider()
+    st.markdown("---")
 
     # ---------- TIME-TO-FILL PANEL --------------------------------------
     st.markdown("### Time-to-fill")
@@ -568,7 +558,7 @@ def render_ta_analytics() -> None:
                     )
                     st.altair_chart(bars, use_container_width=True)
 
-    st.divider()
+    st.markdown("---")
 
     # ---------- RECRUITER WORKLOAD PANEL --------------------------------
     st.markdown("### Recruiter workload (current snapshot)")
@@ -641,7 +631,6 @@ def render_ta_analytics() -> None:
                 {c: "{:.0f}" for c in numeric_cols}
             ),
             use_container_width=True,
-            hide_index=True,
         )
         if load_col == "ACTIVE_WORKLOAD":
             st.caption(

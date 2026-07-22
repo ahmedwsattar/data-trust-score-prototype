@@ -155,6 +155,14 @@ See `ddl/50_create_streamlit_apps.sql` — creates a stage, uploads
 `config.py + shared.py + trust_score_app.py + ai_use_cases_app.py +
 .streamlit/config.toml`, and defines two named `STREAMLIT` objects.
 
+> **SiS runtime compatibility:** this account's Streamlit-in-Snowflake runtime is
+> **< 1.23**, so the apps avoid `st.column_config`, `st.divider()`, and the
+> `st.dataframe(hide_index=...)` parameter (they raise `AttributeError` /
+> `TypeError` on the older runtime). Use `st.markdown("---")` for rules and plain
+> `st.dataframe(df, use_container_width=True)` tables. Also never pass a frame with
+> an ARRAY/VARIANT column straight into `alt.Chart(...)` — subset to the charted
+> columns first, or Altair's sanitizer raises "bad argument type for built-in operation".
+
 ---
 
 ## Design decisions
