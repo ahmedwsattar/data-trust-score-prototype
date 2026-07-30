@@ -30,9 +30,9 @@ from shared import (
     band_color_for,
     enablement_banner,
     load_confidence_factors,
-    load_data_elements,
     load_dmf_dimension_scores,
     load_element_dimension_scores,
+    load_element_trust_detail,
     load_incidents,
     load_lineage,
     load_trust_scores,
@@ -149,7 +149,7 @@ def render_detail() -> None:
     st.subheader("Dataset detail")
     eds = load_element_dimension_scores()
     weights = load_weights()
-    elements = load_data_elements()
+    element_detail = load_element_trust_detail()
     if scores is None or eds is None or weights is None:
         enablement_banner(["DTS_VW_DATASET_TRUST_SCORE_LATEST",
                            "DTS_ELEMENT_DIMENSION_SCORE", "DTS_DIMENSION_WEIGHTS"])
@@ -202,13 +202,71 @@ def render_detail() -> None:
     st.caption("Points = Weight × (Raw × Confidence) / 100. DQ and Observability "
                "carry the per-layer confidence factor; other dimensions use 1.0.")
 
-    # CDE elements
-    if elements is not None and not elements.empty:
-        st.markdown("**Key data elements (CDE = 2× weighted)**")
-        el = elements[(elements["REPORT_FAMILY"] == fam) & (elements["LAYER"] == layer)]
-        el = el[["COLUMN_NAME", "IS_KEY", "IS_CDE", "CRITICALITY_MULTIPLIER", "PII_TAG", "BUSINESS_TERM"]].copy()
-        el.columns = ["Column", "Key", "CDE", "Multiplier", "PII tag", "Business term"]
-        st.dataframe(el, use_container_width=True)
+    # Element-level scorecard: per-column x per-dimension breakdown that
+    # explains how the dataset score is built up (the framework workbook's
+    # "Score - STG_*" matrix).
+    st.markdown("**Data element scorecard — per column × dimension**")
+    if element_detail is None or element_detail.empty:
+        st.caption("No element-level detail yet. Deploy `ddl/32_dts_element_detail.sql` "
+                   "then run `CALL SP_DTS_COMPUTE_SCORES();`.")
+    else:
+        ed_rows = element_detail[
+            (element_detail["REPORT_FAMILY"] == fam)
+            & (element_detail["LAYER"] == layer)
+        ].copy()
+        if ed_rows.empty:
+            st.caption("No elements registered for this object in `DTS_DATA_ELEMENT`.")
+        else:
+            # Ordered (view_col, header-with-weight) for the 10 dimensions.
+            dim_cols = [
+                (f"{code}_EL", f"{label} ({w})")
+                for code, w, _f, _m, label in config.DIMENSIONS
+                if f"{code}_EL" in ed_rows.columns
+            ]
+            for vc, _h in dim_cols:
+                ed_rows[vc] = pd.to_numeric(ed_rows[vc], errors="coerce")
+            ed_rows["ELEMENT_SCORE"] = pd.to_numeric(ed_rows["ELEMENT_SCORE"], errors="coerce")
+            ed_rows["CRITICALITY_MULTIPLIER"] = pd.to_numeric(
+                ed_rows["CRITICALITY_MULTIPLIER"], errors="coerce")
+
+            mat = pd.DataFrame(index=ed_rows["COLUMN_NAME"].astype(str).tolist())
+            for vc, h in dim_cols:
+                mat[h] = ed_rows[vc].values
+            mat["CDE?"] = ed_rows["IS_CDE"].map(lambda b: "Yes" if b else "No").values
+            mat["Crit ×"] = ed_rows["CRITICALITY_MULTIPLIER"].values
+            mat["Element Score"] = ed_rows["ELEMENT_SCORE"].values
+
+            # Dataset Average row (mean per dimension across elements).
+            avg = {h: round(float(ed_rows[vc].mean()), 1) for vc, h in dim_cols}
+            avg["CDE?"] = ""
+            avg["Crit ×"] = ""
+            avg["Element Score"] = round(float(ed_rows["ELEMENT_SCORE"].mean()), 1)
+            mat.loc["Dataset Average"] = avg
+
+            score_cols = [h for _vc, h in dim_cols] + ["Element Score"]
+
+            def _elem_style(r: pd.Series) -> list[str]:
+                if r.name == "Dataset Average":
+                    return ["background-color:#F1F5F9; font-weight:700"] * len(r)
+                if str(r.get("CDE?")) == "Yes":
+                    return ["background-color:#EEF3FF"] * len(r)
+                return [""] * len(r)
+
+            st.dataframe(
+                mat.style.apply(_elem_style, axis=1).format(
+                    {c: "{:.1f}" for c in score_cols}, na_rep="—"
+                ),
+                use_container_width=True,
+            )
+            st.caption(
+                "Per-element for **DQ / Definitions / Classification** (and the "
+                "**CDE** flag / multiplier); the other dimensions inherit the "
+                "dataset value (table-grain today). Headers show each dimension's "
+                "weight; **Element Score** = weighted sum across the row. "
+                "**Dataset Average** approximates the dataset dimension scores "
+                "(the DQ rollup is CDE-weighted, so it can differ slightly from a "
+                "plain average)."
+            )
 
     # Active issues (Jira) driving the Active Issues dimension for this object
     incidents = load_incidents()

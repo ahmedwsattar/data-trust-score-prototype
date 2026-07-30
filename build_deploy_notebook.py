@@ -153,6 +153,12 @@ STEPS = [
      "## 8 · Bridge views  _(reads DTS_DMF_MEASUREMENTS from step 7)_"),
     ("30_dts_scoring_engine.sql", "scoring_engine",
      "## 9 · Scoring engine (`SP_DTS_COMPUTE_SCORES` + latest view)"),
+    ("32_dts_element_detail.sql", "element_detail",
+     "## 9b · Element-level score detail view (`DTS_VW_ELEMENT_TRUST_DETAIL`)\n\n"
+     "Per (family, layer, column) score for each of the 10 dimensions "
+     "(DQ/Definitions/Classification per element, the rest inherited) + "
+     "`ELEMENT_SCORE`. Powers the app's Dataset Detail element matrix. "
+     "Read-only view; returns rows once `SP_DTS_COMPUTE_SCORES()` has run."),
     ("40_dts_seed_metadata.sql", "seed_metadata",
      "## 10 · Seed registries + metadata  _(run before the CALLs below)_"),
     ("45_dts_jira_incidents.sql", "jira_incidents",

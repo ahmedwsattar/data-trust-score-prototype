@@ -124,6 +124,13 @@ def load_data_elements() -> pd.DataFrame | None:
     return _read("DTS_DATA_ELEMENT")
 
 
+@st.cache_data(show_spinner=False, ttl=120)
+def load_element_trust_detail() -> pd.DataFrame | None:
+    """Per (family, layer, column) score for each of the 10 dimensions +
+    ELEMENT_SCORE -- the element-grain drill-down behind the dataset score."""
+    return _read("DTS_VW_ELEMENT_TRUST_DETAIL")
+
+
 @st.cache_data(show_spinner=False, ttl=300)
 def load_weights() -> pd.DataFrame | None:
     return _read("DTS_DIMENSION_WEIGHTS")
